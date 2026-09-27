@@ -4,16 +4,14 @@
 Компании добавляются через бота и живут в таблице companies. У кого нет
 читаемой доски — следим за изменением карьерной страницы по хешу.
 """
-import hashlib, json, os, re, sqlite3, sys, time, urllib.error, urllib.request
+import hashlib, json, os, re, sys, time, urllib.error, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
+import storage
 
-# BOT_DATA прокинут в контейнер бота как /data. Без него сборщик внутри
-# контейнера создавал вторую базу по хостовому пути — она жила в слое
-# контейнера и умирала с ним.
-DB = Path(os.environ.get("BOT_DATA", "/projects/localhome/services/careers_bot/data")) / "bot.db"
+
 UA = {"User-Agent": "Mozilla/5.0 (careers-bot; +local)"}
 TIMEOUT = 15
 
@@ -275,28 +273,8 @@ def page_hash(url):
 
 # --- база -------------------------------------------------------------------
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS companies(
-  name TEXT PRIMARY KEY, page_url TEXT, ats TEXT, slug TEXT, checked_at TEXT);
-CREATE TABLE IF NOT EXISTS jobs(
-  url TEXT PRIMARY KEY, company TEXT, title TEXT, location TEXT,
-  source TEXT, first_seen TEXT, posted TEXT, salary TEXT, contact TEXT, closed_at TEXT);
-CREATE TABLE IF NOT EXISTS pages(
-  url TEXT PRIMARY KEY, hash TEXT, checked_at TEXT);
-"""
-
-
 def db():
-    DB.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(DB, timeout=30)
-    c.executescript(SCHEMA)
-    for col in ("posted TEXT", "salary TEXT", "contact TEXT", "closed_at TEXT"):   # база могла быть создана раньше
-        try:
-            c.execute(f"ALTER TABLE jobs ADD COLUMN {col}")
-            c.commit()
-        except sqlite3.OperationalError:
-            pass
-    return c
+    return storage.connect()
 
 
 def collect(name, url, cache):
@@ -321,7 +299,7 @@ def run(only=None):
     companies = registry_db(conn)
     if only:
         companies = [c for c in companies if only.lower() in c[0].lower()]
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = storage.now()
     cache = {n: (a, s) for n, a, s in conn.execute(
         "SELECT name, ats, slug FROM companies WHERE ats IS NOT NULL")}
     # discovery последовательно и один раз на компанию: параллельно ATS отдают 429
@@ -412,7 +390,6 @@ if __name__ == "__main__":
         new, changed, stats = run(sys.argv[1] if len(sys.argv) > 1 else None)
         for name, ats, fresh in sorted(stats, key=lambda x: -x[2])[:15]:
             print(f"{fresh:4}  {name:24} {ats}")
-        import sqlite3 as _s
-        shut = _s.connect(DB).execute("select count(*) from jobs where closed_at is not null").fetchone()[0]
+        shut = db().execute("select count(*) from jobs where closed_at is not null").fetchone()[0]
         print(f"\nновых вакансий {len(new)}, страниц изменилось {len(changed)}, "
               f"компаний {len(stats)}, закрытых всего {shut}")

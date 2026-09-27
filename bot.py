@@ -10,10 +10,11 @@ import urllib.error, urllib.parse, urllib.request
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+import storage
+from storage import log, now
+
 TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 API = f"https://api.telegram.org/bot{TOKEN}"
-DATA = Path(os.environ.get("BOT_DATA", "/data"))
-DB = DATA / "bot.db"
 INVITE_HOURS = 48
 
 HELP = """Что я умею:
@@ -152,50 +153,8 @@ def download(file_id, dest):
 
 # --- база и аудит -----------------------------------------------------------
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS users(
-  tg_id INTEGER PRIMARY KEY, username TEXT, profile TEXT, is_admin INTEGER DEFAULT 0,
-  invited_by INTEGER, joined_at TEXT, paused INTEGER DEFAULT 0);
-CREATE TABLE IF NOT EXISTS invites(
-  code TEXT PRIMARY KEY, created_by INTEGER, created_at TEXT, expires_at TEXT, used_by INTEGER);
-CREATE TABLE IF NOT EXISTS sent(
-  tg_id INTEGER, job_url TEXT, sent_at TEXT, PRIMARY KEY(tg_id, job_url));
-CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
-CREATE TABLE IF NOT EXISTS profiles(
-  tg_id INTEGER PRIMARY KEY, data TEXT, min_match INTEGER DEFAULT 70,
-  notify TEXT DEFAULT 'daily', updated_at TEXT);
-CREATE TABLE IF NOT EXISTS answers(
-  tg_id INTEGER, question TEXT, answer TEXT, created_at TEXT);
-CREATE TABLE IF NOT EXISTS profile_edits(
-  tg_id INTEGER, text TEXT, changed TEXT, created_at TEXT);
-CREATE TABLE IF NOT EXISTS matches(
-  tg_id INTEGER, job_url TEXT, pct INTEGER, why TEXT, scored_at TEXT,
-  PRIMARY KEY(tg_id, job_url));
-"""
-
-
 def db():
-    DATA.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(DB, timeout=30)
-    c.executescript(SCHEMA)
-    for col in ("step INTEGER DEFAULT 0", "awaiting TEXT", "last_notified TEXT"):  # база могла быть старее
-        try:
-            c.execute(f"ALTER TABLE users ADD COLUMN {col}")
-            c.commit()
-        except sqlite3.OperationalError:
-            pass
-    return c
-
-
-def log(*parts):
-    DATA.mkdir(parents=True, exist_ok=True)
-    line = "\t".join(str(p) for p in parts)
-    with open(DATA / "audit.log", "a") as f:
-        f.write(f"{now()}\t{line}\n")
-
-
-def now():
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return storage.connect()
 
 
 # --- профиль из резюме -------------------------------------------------------
@@ -547,6 +506,166 @@ def render_db_profile(conn, tg_id):
     return "\n".join(out)
 
 
+# --- команды -----------------------------------------------------------------
+# Таблица вместо цепочки elif: одна команда — одна функция, видно, что есть.
+# Каждая принимает один и тот же контекст.
+
+class Ctx:
+    def __init__(self, conn, chat, tg_id, arg, is_admin):
+        self.conn, self.chat, self.tg_id = conn, chat, tg_id
+        self.arg, self.is_admin = arg, is_admin
+
+    def say(self, text, **kw):
+        return send(self.chat, text, **kw)
+
+
+def cmd_help(c):
+    c.say(HELP + (ADMIN_HELP if c.is_admin else ""))
+
+
+def cmd_profile(c):
+    if get_profile(c.conn, c.tg_id):
+        c.say(render_db_profile(c.conn, c.tg_id)[:3500], html=True, markup=keyboard(PROFILE_MENU))
+    elif (Path("/tmp") / f"cv-{c.tg_id}.pdf").exists():
+        c.say("Резюме получено. Профиль соберётся, когда ответите на вопросы.")
+    else:
+        c.say("Профиля пока нет. Пришлите резюме файлом — дальше пять вопросов.")
+
+
+def cmd_cv(c):
+    c.say("Пришлите файл резюме следующим сообщением.")
+
+
+def cmd_settings(c):
+    if not get_profile(c.conn, c.tg_id):
+        c.say("Профиля ещё нет — настраивать нечего.")
+        return
+    if not c.arg:
+        c.say(settings_text(c.conn, c.tg_id), markup=keyboard(SETTINGS_MENU))
+        return
+    low = c.arg.lower()
+    if low in ("daily", "instant", "off"):
+        c.conn.execute("UPDATE profiles SET notify=? WHERE tg_id=?", (low, c.tg_id))
+        c.conn.commit()
+        c.say(f"Уведомления: {NOTIFY_RU.get(low, low)}." +
+              (" Новые вакансии копятся, придут когда включите." if low == "off" else ""))
+    elif low.isdigit() and 0 <= int(low) <= 100:
+        c.conn.execute("UPDATE profiles SET min_match=? WHERE tg_id=?", (int(low), c.tg_id))
+        c.conn.commit()
+        c.say(f"Порог {low}%. Ниже этого не присылаю. Уже отправленное не повторяется.")
+    else:
+        c.say("Не понял. Нужно число 0–100 или daily | instant | off.")
+
+
+def cmd_add(c):
+    if not c.arg:
+        c.say("Пришлите ссылку или название после команды, либо нажмите кнопку в /profile.")
+        return
+    c.say(add_company(c.conn, c.arg))
+
+
+def cmd_edit(c):
+    if not c.arg:
+        c.say("Напишите после команды, что поправить.")
+        return
+    c.say(apply_edit(c.conn, c.tg_id, c.arg), html=True, markup=keyboard(PROFILE_MENU))
+
+
+def cmd_pause(c):
+    c.conn.execute("UPDATE users SET paused=1 WHERE tg_id=?", (c.tg_id,)); c.conn.commit()
+    c.say("Уведомления остановлены. /resume вернёт.")
+
+
+def cmd_resume(c):
+    c.conn.execute("UPDATE users SET paused=0 WHERE tg_id=?", (c.tg_id,)); c.conn.commit()
+    c.say("Уведомления снова идут.")
+
+
+def cmd_invite(c):
+    code = secrets.token_urlsafe(9)
+    exp = (datetime.now(timezone.utc) + timedelta(hours=INVITE_HOURS)).isoformat(timespec="seconds")
+    c.conn.execute("INSERT INTO invites(code,created_by,created_at,expires_at) VALUES(?,?,?,?)",
+                   (code, c.tg_id, now(), exp))
+    c.conn.commit()
+    me = call("getMe") or {}
+    link = f"https://t.me/{me.get('username','')}?start={code}" if me.get("username") else code
+    c.say(f"Ссылка живёт {INVITE_HOURS} часа:\n{link}")
+
+
+def cmd_users(c):
+    rows = c.conn.execute("SELECT tg_id, username, profile, paused FROM users").fetchall()
+    c.say("\n".join(f"{r[0]} @{r[1] or '—'} профиль {r[2] or 'нет'}"
+                     f"{' (пауза)' if r[3] else ''}" for r in rows) or "пусто")
+
+
+def cmd_revoke(c):
+    c.conn.execute("DELETE FROM users WHERE tg_id=? AND is_admin=0", (c.arg,))
+    c.conn.commit()
+    c.say(f"Доступ {c.arg} отозван." if c.conn.total_changes else "Такого нет или это админ.")
+
+
+HANDLERS = {"/start": cmd_help, "/help": cmd_help, "/profile": cmd_profile, "/cv": cmd_cv,
+            "/settings": cmd_settings, "/add": cmd_add, "/edit": cmd_edit,
+            "/pause": cmd_pause, "/resume": cmd_resume}
+ADMIN_HANDLERS = {"/invite": cmd_invite, "/users": cmd_users, "/revoke": cmd_revoke}
+
+
+# --- разбор входящего --------------------------------------------------------
+
+def on_document(conn, chat, tg_id, doc):
+    """Резюме живёт минуты: текст уедет в профиль, файл удалится."""
+    dest = Path("/tmp") / f"cv-{tg_id}.pdf"
+    if not download(doc["file_id"], dest):
+        send(chat, "Файл не скачался. Пришлите ещё раз — лучше PDF до 20 МБ.")
+        return
+    log("cv", tg_id, dest.name)
+    conn.execute("UPDATE users SET step=1 WHERE tg_id=?", (tg_id,))
+    conn.commit()
+    send(chat, "Резюме получил. Теперь пять коротких вопросов.\n\n" + QUESTIONS[0])
+
+
+def on_answer(conn, chat, tg_id, step, text):
+    """Ответ на вопрос онбординга. Последний запускает сборку профиля."""
+    conn.execute("INSERT INTO answers(tg_id,question,answer,created_at) VALUES(?,?,?,?)",
+                 (tg_id, QUESTIONS[step - 1], text, now()))
+    if step < len(QUESTIONS):
+        conn.execute("UPDATE users SET step=? WHERE tg_id=?", (step + 1, tg_id))
+        conn.commit()
+        send(chat, f"{step + 1} из {len(QUESTIONS)}. {QUESTIONS[step]}")
+        return
+    conn.execute("UPDATE users SET step=0 WHERE tg_id=?", (tg_id,))
+    conn.commit()
+    send(chat, DONE)
+    log("onboarding-done", tg_id)
+    cv = Path("/tmp") / f"cv-{tg_id}.pdf"
+    try:
+        data = build_profile(conn, tg_id, cv)
+    except Exception as e:
+        log("profile-error", tg_id, repr(e))
+        send(chat, "Не получилось собрать профиль из этого файла. "
+                   "Пришлите резюме текстом или другим PDF: /cv")
+        return
+    finally:
+        cv.unlink(missing_ok=True)          # чужое резюме на диске не держим
+    if data:
+        conn.execute("UPDATE users SET profile=? WHERE tg_id=?", (str(tg_id), tg_id))
+        conn.commit()
+        send(chat, render_db_profile(conn, tg_id), html=True, markup=keyboard(PROFILE_MENU))
+
+
+def on_awaited(conn, chat, tg_id, kind, text):
+    """Ответ на кнопку «Добавить компанию» или «Поправить профиль»."""
+    conn.execute("UPDATE users SET awaiting=NULL WHERE tg_id=?", (tg_id,))
+    conn.commit()
+    if kind == "add":
+        send(chat, "Ищу доску вакансий, это займёт до минуты…")
+        send(chat, add_company(conn, text))
+    else:
+        send(chat, "Правлю профиль…")
+        send(chat, apply_edit(conn, tg_id, text), html=True, markup=keyboard(PROFILE_MENU))
+    log(f"{kind}-done", tg_id, text[:60])
+
+
 def handle(conn, msg):
     chat = msg["chat"]["id"]
     tg_id = msg["from"]["id"]
@@ -558,139 +677,32 @@ def handle(conn, msg):
     if not ok:
         return
     log("msg", tg_id, username, text[:80])
-    is_admin = conn.execute("SELECT is_admin FROM users WHERE tg_id=?", (tg_id,)).fetchone()[0]
 
-    doc = msg.get("document")
-    if doc:
-        # Резюме живёт минуты: текст уедет в профиль, файл удалится.
-        dest = Path("/tmp") / f"cv-{tg_id}.pdf"
-        if download(doc["file_id"], dest):
-            log("cv", tg_id, dest.name)
-            conn.execute("UPDATE users SET step=1 WHERE tg_id=?", (tg_id,))
-            conn.commit()
-            send(chat, "Резюме получил. Теперь пять коротких вопросов.\n\n" + QUESTIONS[0])
-        else:
-            send(chat, "Файл не скачался. Пришлите ещё раз — лучше PDF до 20 МБ.")
+    if msg.get("document"):
+        on_document(conn, chat, tg_id, msg["document"])
         return
 
-    step = conn.execute("SELECT step FROM users WHERE tg_id=?", (tg_id,)).fetchone()[0] or 0
-    if step and text and not text.startswith("/"):
-        conn.execute("INSERT INTO answers(tg_id,question,answer,created_at) VALUES(?,?,?,?)",
-                     (tg_id, QUESTIONS[step - 1], text, now()))
-        conn.commit()
-        if step < len(QUESTIONS):
-            conn.execute("UPDATE users SET step=? WHERE tg_id=?", (step + 1, tg_id))
-            conn.commit()
-            send(chat, f"{step + 1} из {len(QUESTIONS)}. {QUESTIONS[step]}")
-        else:
-            conn.execute("UPDATE users SET step=0 WHERE tg_id=?", (tg_id,))
-            conn.commit()
-            send(chat, DONE)
-            log("onboarding-done", tg_id)
-            cv = Path("/tmp") / f"cv-{tg_id}.pdf"
-            try:
-                data = build_profile(conn, tg_id, cv)
-            except Exception as e:
-                log("profile-error", tg_id, repr(e))
-                send(chat, "Не получилось собрать профиль из этого файла. "
-                       "Пришлите резюме текстом или другим PDF: /cv")
-                return
-            finally:
-                cv.unlink(missing_ok=True)      # чужое резюме на диске не держим
-            if data:
-                conn.execute("UPDATE users SET profile=? WHERE tg_id=?", (str(tg_id), tg_id))
-                conn.commit()
-                send(chat, render_db_profile(conn, tg_id), html=True,
-                     markup=keyboard(PROFILE_MENU))
+    step, waiting, is_admin = conn.execute(
+        "SELECT step, awaiting, is_admin FROM users WHERE tg_id=?", (tg_id,)).fetchone()
+    free_text = text and not text.startswith("/")
+    if step and free_text:
+        on_answer(conn, chat, tg_id, step, text)
         return
-
-    waiting = conn.execute("SELECT awaiting FROM users WHERE tg_id=?", (tg_id,)).fetchone()[0]
-    if waiting in ("add", "edit") and text and not text.startswith("/"):
-        conn.execute("UPDATE users SET awaiting=NULL WHERE tg_id=?", (tg_id,))
-        conn.commit()
-        if waiting == "add":
-            send(chat, "Ищу доску вакансий, это займёт до минуты…")
-            send(chat, add_company(conn, text))
-        else:
-            send(chat, "Правлю профиль…")
-            send(chat, apply_edit(conn, tg_id, text), html=True,
-                 markup=keyboard(PROFILE_MENU))
-        log(f"{waiting}-done", tg_id, text[:60])
+    if waiting in ("add", "edit") and free_text:
+        on_awaited(conn, chat, tg_id, waiting, text)
         return
 
     cmd, _, arg = text.partition(" ")
-    cmd, arg = cmd.lower(), arg.strip()
+    cmd = cmd.lower()
     if waiting and text.startswith("/"):      # передумал и пошёл другой командой
         conn.execute("UPDATE users SET awaiting=NULL WHERE tg_id=?", (tg_id,))
         conn.commit()
-
     if cmd == "/cancel":
         send(chat, "Отменил." if waiting else "Нечего отменять.")
         return
 
-    if cmd in ("/start", "/help"):
-        send(chat, HELP + (ADMIN_HELP if is_admin else ""))
-    elif cmd == "/profile":
-        if get_profile(conn, tg_id):
-            send(chat, render_db_profile(conn, tg_id)[:3500], html=True,
-                 markup=keyboard(PROFILE_MENU))
-        elif (Path("/tmp") / f"cv-{tg_id}.pdf").exists():
-            # резюме уже прислали: не отправлять человека по второму кругу
-            send(chat, "Резюме получено. Профиль соберётся, когда ответите на вопросы.")
-        else:
-            send(chat, "Профиля пока нет. Пришлите резюме файлом — дальше пять вопросов.")
-    elif cmd == "/cv":
-        send(chat, "Пришлите файл резюме следующим сообщением.")
-    elif cmd == "/settings":
-        if not get_profile(conn, tg_id):
-            send(chat, "Профиля ещё нет — настраивать нечего.")
-            return
-        if not arg:
-            send(chat, settings_text(conn, tg_id), markup=keyboard(SETTINGS_MENU))
-            return
-        low = arg.lower()
-        if low in ("daily", "instant", "off"):
-            conn.execute("UPDATE profiles SET notify=? WHERE tg_id=?", (low, tg_id)); conn.commit()
-            send(chat, f"Уведомления: {NOTIFY_RU.get(low, low)}." +
-                 (" Новые вакансии копятся, придут когда включите." if low == "off" else ""))
-        elif low.isdigit() and 0 <= int(low) <= 100:
-            conn.execute("UPDATE profiles SET min_match=? WHERE tg_id=?", (int(low), tg_id)); conn.commit()
-            send(chat, f"Порог {low}%. Ниже этого не присылаю. Уже отправленное не повторяется.")
-        else:
-            send(chat, "Не понял. Нужно число 0–100 или daily | instant | off.")
-    elif cmd == "/add":
-        if not arg:
-            send(chat, "Пришлите ссылку или название после команды, либо нажмите кнопку в /profile.")
-            return
-        send(chat, add_company(conn, arg))
-    elif cmd == "/edit":
-        if not arg:
-            send(chat, "Напишите после команды, что поправить.")
-            return
-        send(chat, apply_edit(conn, tg_id, arg), html=True, markup=keyboard(PROFILE_MENU))
-    elif cmd == "/pause":
-        conn.execute("UPDATE users SET paused=1 WHERE tg_id=?", (tg_id,)); conn.commit()
-        send(chat, "Уведомления остановлены. /resume вернёт.")
-    elif cmd == "/resume":
-        conn.execute("UPDATE users SET paused=0 WHERE tg_id=?", (tg_id,)); conn.commit()
-        send(chat, "Уведомления снова идут.")
-    elif cmd == "/invite" and is_admin:
-        code = secrets.token_urlsafe(9)
-        exp = (datetime.now(timezone.utc) + timedelta(hours=INVITE_HOURS)).isoformat(timespec="seconds")
-        conn.execute("INSERT INTO invites(code,created_by,created_at,expires_at) VALUES(?,?,?,?)",
-                     (code, tg_id, now(), exp)); conn.commit()
-        me = call("getMe") or {}
-        link = f"https://t.me/{me.get('username','')}?start={code}" if me.get("username") else code
-        send(chat, f"Ссылка живёт {INVITE_HOURS} часа:\n{link}")
-    elif cmd == "/users" and is_admin:
-        rows = conn.execute("SELECT tg_id, username, profile, paused FROM users").fetchall()
-        send(chat, "\n".join(f"{r[0]} @{r[1] or '—'} профиль {r[2] or 'нет'}"
-                             f"{' (пауза)' if r[3] else ''}" for r in rows) or "пусто")
-    elif cmd == "/revoke" and is_admin:
-        conn.execute("DELETE FROM users WHERE tg_id=? AND is_admin=0", (arg,)); conn.commit()
-        send(chat, f"Доступ {arg} отозван." if conn.total_changes else "Такого нет или это админ.")
-    else:
-        send(chat, HELP + (ADMIN_HELP if is_admin else ""))
+    fn = HANDLERS.get(cmd) or (ADMIN_HANDLERS.get(cmd) if is_admin else None)
+    (fn or cmd_help)(Ctx(conn, chat, tg_id, arg.strip(), is_admin))
 
 
 COMMANDS = [
@@ -810,11 +822,9 @@ def selftest():
 
     # карточка собирается из базы, без markdown-очередей
     conn = sqlite3.connect(":memory:")
-    conn.executescript(SCHEMA)
-    conn.execute("CREATE TABLE jobs(url TEXT PRIMARY KEY, company TEXT, title TEXT, "
-                 "location TEXT, posted TEXT, salary TEXT, contact TEXT, closed_at TEXT)")
-    conn.execute("INSERT INTO jobs VALUES('http://x','Alpaca','Senior Go','Remote',"
-                 "'2024-12-01',NULL,'Ann Lee',NULL)")
+    conn.executescript(storage.SCHEMA)
+    conn.execute("INSERT INTO jobs(url,company,title,location,posted,contact) "
+                 "VALUES('http://x','Alpaca','Senior Go','Remote','2024-12-01','Ann Lee')")
     card = job_card_db(conn, "http://x", 91, "почему берём")
     assert '<a href="http://x">Senior Go — Alpaca</a>' in card, card
     assert "<b>Совпадение 91%</b>" in card and "висит" in card and "Ann Lee" in card
@@ -824,6 +834,12 @@ def selftest():
                  (json.dumps({"name": "Тест", "role": "Senior Backend", "stack": ["Go", "Python"]}),))
     r = render_db_profile(conn, 1)
     assert "<b>Роль:</b> Senior Backend" in r and "Go, Python" in r and "от 80%" in r
+    assert set(HANDLERS) >= {"/start", "/profile", "/settings", "/add", "/edit"}, HANDLERS
+    assert set(ADMIN_HANDLERS) == {"/invite", "/users", "/revoke"}
+    assert not (set(HANDLERS) & set(ADMIN_HANDLERS)), "команда не может быть и общей, и админской"
+    named = {c for c, _ in COMMANDS} | {c for c, _ in ADMIN_COMMANDS}
+    have = {c.lstrip("/") for c in list(HANDLERS) + list(ADMIN_HANDLERS)} | {"cancel"}
+    assert named <= have, f"в меню есть то, чего нет в обработчиках: {named - have}"
     print("selftest ok")
 
 
