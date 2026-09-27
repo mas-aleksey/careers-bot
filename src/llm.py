@@ -9,6 +9,9 @@ import json, os, time, urllib.error, urllib.request
 URL = "https://openrouter.ai/api/v1/chat/completions"
 KEY = os.environ.get("OPENROUTER_API_KEY", "")
 MODEL = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-sonnet-5")
+# Первый проход — отсев заведомо чужих профессий. Втрое дешевле не бывает:
+# 93% вакансий получают ноль, и платить за них основной моделью незачем.
+TRIAGE_MODEL = os.environ.get("OPENROUTER_TRIAGE_MODEL", "google/gemini-2.5-flash-lite")
 TIMEOUT = 180
 RETRY_CODES = (408, 409, 429, 500, 502, 503, 504)
 

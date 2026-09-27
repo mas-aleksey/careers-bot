@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS matches(
   tg_id INTEGER, job_url TEXT, pct INTEGER, why TEXT, scored_at TEXT,
   PRIMARY KEY(tg_id, job_url));
 CREATE TABLE IF NOT EXISTS companies(
-  name TEXT PRIMARY KEY, page_url TEXT, ats TEXT, slug TEXT, checked_at TEXT);
+  name TEXT PRIMARY KEY, page_url TEXT, ats TEXT, slug TEXT, checked_at TEXT,
+  last_ok TEXT, last_count INTEGER, last_error TEXT);
 CREATE TABLE IF NOT EXISTS jobs(
   url TEXT PRIMARY KEY, company TEXT, title TEXT, location TEXT,
   source TEXT, first_seen TEXT, posted TEXT, salary TEXT, contact TEXT, closed_at TEXT);
@@ -46,6 +47,9 @@ LATE_COLUMNS = [
     ("users", "last_notified TEXT"),
     ("jobs", "posted TEXT"), ("jobs", "salary TEXT"),
     ("jobs", "contact TEXT"), ("jobs", "closed_at TEXT"),
+    # здоровье источника: молчит доска или отвечает пустым — это разные беды
+    ("companies", "last_ok TEXT"), ("companies", "last_count INTEGER"),
+    ("companies", "last_error TEXT"),
 ]
 
 

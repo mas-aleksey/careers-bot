@@ -236,6 +236,31 @@ SCORE_SYSTEM = """Ты оцениваешь вакансии под профил
 В ответе только JSON, без пояснений до или после него."""
 
 BATCH = 20
+TRIAGE_BATCH = 50
+
+TRIAGE_SYSTEM = """Отсев по названию должности. Тебе дают профессию кандидата и
+список вакансий с номерами.
+
+Верни JSON: {"keep": [номера тех, чья должность относится к этой профессии или
+к соседней, откуда переходят]}.
+
+Соседние считаются: для аналитика это product manager, product owner, solution
+architect; для бэкенда — platform, infrastructure, SRE. Маркетинг, продажи,
+поддержка, бухгалтерия, рекрутинг — не относятся ни к чему из этого.
+Сомневаешься — оставляй."""
+
+
+def triage(profile, rows):
+    """Кто вообще из этой профессии. Дешёвая модель, только заголовки."""
+    import llm
+    listing = "\n".join(f"{i+1}. {t}" for i, (_, _, t, _) in enumerate(rows))
+    out = llm.ask_json(
+        TRIAGE_SYSTEM,
+        f"ПРОФЕССИЯ: {profile.get('role', '')}, уровень {profile.get('level', '')}\n\n"
+        f"ВАКАНСИИ:\n{listing}",
+        model=llm.TRIAGE_MODEL, max_tokens=1500)
+    keep = {int(n) for n in out.get("keep", []) if str(n).isdigit()}
+    return [r for i, r in enumerate(rows, 1) if i in keep]
 
 
 def score_batch(profile, rows):
@@ -264,6 +289,25 @@ def score_pending(conn, tg_id, limit=200):
         LEFT JOIN matches m ON m.job_url = j.url AND m.tg_id = ?
         WHERE m.job_url IS NULL AND j.closed_at IS NULL
         ORDER BY j.posted DESC NULLS LAST LIMIT ?""", (tg_id, limit)).fetchall()
+    # Первый проход дешёвой моделью: отсеянным сразу ноль, без оплаты основной.
+    survivors = []
+    for i in range(0, len(rows), TRIAGE_BATCH):
+        part = rows[i:i + TRIAGE_BATCH]
+        try:
+            keep = triage(profile, part)
+        except Exception as e:
+            log("triage-error", tg_id, repr(e))
+            keep = part                      # не смогли отсеять — оцениваем всё
+        survivors += keep
+        for url, *_ in part:
+            if url not in {u for u, *_ in keep}:
+                conn.execute("INSERT OR REPLACE INTO matches(tg_id,job_url,pct,why,scored_at) "
+                             "VALUES(?,?,0,'другая профессия',?)", (tg_id, url, now()))
+    conn.commit()
+    if len(rows) != len(survivors):
+        log("triage", tg_id, f"{len(survivors)} из {len(rows)}")
+    rows = survivors
+
     done, failed = 0, 0
     for i in range(0, len(rows), BATCH):
         chunk = rows[i:i + BATCH]
@@ -762,6 +806,48 @@ def scorer_loop():
             log("scorer-error", repr(e))
 
 
+def health_report(conn):
+    """Сводка о здоровье источников. Молчание — самое опасное состояние:
+    поломка выглядит ровно как спокойный день без новых вакансий."""
+    silent = conn.execute("""
+        SELECT name, ats, last_error, last_ok FROM companies
+        WHERE ats IS NOT NULL AND last_error IS NOT NULL
+        ORDER BY name""").fetchall()
+    empty = conn.execute("""
+        SELECT name FROM companies
+        WHERE ats IS NOT NULL AND last_error IS NULL AND COALESCE(last_count, 0) = 0
+        ORDER BY name""").fetchall()
+    day = conn.execute("SELECT COUNT(*) FROM jobs WHERE first_seen > datetime('now','-1 day')").fetchone()[0]
+    closed = conn.execute("SELECT COUNT(*) FROM jobs WHERE closed_at > datetime('now','-1 day')").fetchone()[0]
+    total = conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0]
+    lines = [f"<b>Источники за сутки</b>",
+             f"{total} компаний · +{day} вакансий · закрылось {closed}"]
+    if silent:
+        lines.append("")
+        lines.append("⚠️ <b>Не отдают вакансии:</b>")
+        for name, ats, err, ok in silent[:10]:
+            when = f", последний раз {ok[:10]}" if ok else ", ни разу"
+            lines.append(f"· {esc(name)} ({ats}): {esc(err)}{when}")
+    if empty:
+        lines.append("")
+        lines.append("Пусто, но доска отвечает: " + ", ".join(esc(n) for n, in empty[:10]))
+    if not silent and not empty:
+        lines.append("Все источники отвечают.")
+    return "\n".join(lines)
+
+
+def daily_health(conn):
+    """Раз в сутки админу. Чаще — шум, реже — узнаешь о поломке поздно."""
+    row = conn.execute("SELECT value FROM meta WHERE key='health_at'").fetchone()
+    if row and row[0] > (datetime.now(timezone.utc) - timedelta(hours=20)).isoformat():
+        return
+    admin = conn.execute("SELECT tg_id FROM users WHERE is_admin=1").fetchone()
+    if admin and send(admin[0], health_report(conn), html=True):
+        conn.execute("INSERT INTO meta(key,value) VALUES('health_at',?) "
+                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (now(),))
+        conn.commit()
+
+
 def collector_loop():
     """Сборщик вакансий крутится здесь же: отдельный планировщик ради одной
     команды дважды в сутки не нужен, а контейнер и так перезапускается сам."""
@@ -803,6 +889,7 @@ def main():
                          "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(offset),))
             conn.commit()
         if time.time() - last_deliver > 300:
+            daily_health(conn)
             n = deliver(conn)
             if n:
                 log("delivered", n)

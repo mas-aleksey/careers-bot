@@ -299,6 +299,28 @@ def embedded(url):
     return out or next_data(html)
 
 
+def diagnose(ats, slug, url):
+    """Почему не ответило. Один запрос, только при неудаче: код говорит
+    больше, чем факт молчания — 403 это Cloudflare, 404 сменившийся slug."""
+    probe = {"ashby": f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
+             "greenhouse": f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs",
+             "lever": f"https://api.lever.co/v0/postings/{slug}?mode=json",
+             "smartrecruiters": f"https://api.smartrecruiters.com/v1/companies/{slug}/postings",
+             "workable": f"https://apply.workable.com/api/v1/widget/accounts/{slug}",
+             "recruitee": f"https://{slug}.recruitee.com/api/offers/",
+             "teamtailor": f"https://{slug}.teamtailor.com/jobs.json",
+             "pinpoint": f"https://{slug}.pinpointhq.com/postings.json"}.get(ats, url)
+    if not probe:
+        return "нет адреса для проверки"
+    try:
+        urllib.request.urlopen(urllib.request.Request(probe, headers=UA), timeout=TIMEOUT).read()
+        return "ответ есть, но разобрать не удалось — возможно, сменился формат"
+    except urllib.error.HTTPError as e:
+        return f"HTTP {e.code}"
+    except Exception as e:
+        return type(e).__name__
+
+
 def page_hash(url):
     """Ступень 4: хеш текста без тегов. Не 'новая вакансия', а 'страница изменилась'."""
     html = get(url, want_json=False)
@@ -355,6 +377,15 @@ def run(only=None):
         conn.execute("INSERT INTO companies(name,page_url,ats,slug,checked_at) VALUES(?,?,?,?,?) "
                      "ON CONFLICT(name) DO UPDATE SET ats=excluded.ats, slug=excluded.slug, "
                      "checked_at=excluded.checked_at", (name, url, ats, slug, now))
+        if ats:
+            if jobs:
+                conn.execute("UPDATE companies SET last_ok=?, last_count=?, last_error=NULL "
+                             "WHERE name=?", (now, len(jobs), name))
+            else:
+                why = ("доска вернула пустой список" if jobs == []
+                       else diagnose(ats, slug, url))
+                conn.execute("UPDATE companies SET last_count=?, last_error=? WHERE name=?",
+                             (0, why, name))
         if jobs is None:
             old = conn.execute("SELECT hash FROM pages WHERE url=?", (url,)).fetchone()
             if phash and (not old or old[0] != phash):
