@@ -74,21 +74,5 @@ def log(*parts):
         f.write(now() + "\t" + "\t".join(str(p) for p in parts) + "\n")
 
 
-def selftest():
-    import tempfile
-    os.environ["BOT_DATA"] = tempfile.mkdtemp()
-    global DATA, DB
-    DATA = Path(os.environ["BOT_DATA"]); DB = DATA / "bot.db"
-    c = connect()
-    tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert {"users", "jobs", "profiles", "matches", "companies"} <= tables, tables
-    assert connect() is not None, "повторное подключение не должно падать"
-    cols = {r[1] for r in c.execute("PRAGMA table_info(jobs)")}
-    assert {"posted", "salary", "contact", "closed_at"} <= cols, cols
-    assert now().endswith("+00:00")
-    print("selftest ok")
-
-
 if __name__ == "__main__":
-    import sys
-    selftest() if len(sys.argv) > 1 and sys.argv[1] == "selftest" else print(DB)
+    print(DB)

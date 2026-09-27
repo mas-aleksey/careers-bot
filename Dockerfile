@@ -3,5 +3,5 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 # pypdf — единственная зависимость: резюме приходят в PDF, текст надо достать
 RUN pip install --no-cache-dir pypdf==6.1.1
-COPY bot.py llm.py jobs.py storage.py ./
+COPY src/ ./
 CMD ["python", "bot.py"]

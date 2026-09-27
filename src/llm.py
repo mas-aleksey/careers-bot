@@ -81,23 +81,5 @@ def ask_json(system, user, model=None, max_tokens=4096):
         raise LLMError(f"не JSON: {e}: {text[:200]}")
 
 
-def selftest():
-    b = build([{"role": "user", "content": "hi"}], json_mode=True)
-    assert b["model"] and b["messages"][0]["content"] == "hi"
-    assert b["response_format"] == {"type": "json_object"}
-    assert "response_format" not in build([{"role": "user", "content": "hi"}])
-    assert extract_json('```json\n{"a":1}\n```') == '{"a":1}'
-    assert extract_json('{"a":1}') == '{"a":1}'
-    # модель объяснила словами и только потом выдала JSON
-    assert extract_json('Все вакансии мимо.\n\n{"scores": []}') == '{"scores": []}'
-    assert json.loads(extract_json('текст {"scores":[{"pct":9}]} хвост'))["scores"][0]["pct"] == 9
-    assert 429 in RETRY_CODES and 400 not in RETRY_CODES
-    print("selftest ok")
-
-
 if __name__ == "__main__":
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "selftest":
-        selftest()
-    else:
-        print(ask_json("Отвечай JSON.", 'Верни {"ok": true} и ничего больше.'))
+    print(ask_json("Отвечай JSON.", 'Верни {"ok": true} и ничего больше.'))

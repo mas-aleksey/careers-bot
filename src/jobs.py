@@ -400,41 +400,10 @@ def run(only=None):
     return new, changed, stats
 
 
-def selftest():
-    assert from_url("https://jobs.ashbyhq.com/constructor") == ("ashby", "constructor")
-    assert from_url("https://job-boards.greenhouse.io/nebius") == ("greenhouse", "nebius")
-    assert from_url("https://jobs.lever.co/appfollow") == ("lever", "appfollow")
-    assert from_url("https://praktika.teamtailor.com/jobs") == ("teamtailor", "praktika")
-    assert from_url("https://elixi.com/careers") is None
-    assert slugify("Grid Dynamics") == "griddynamics"
-    assert slug_variants("Salmon Group") == ["salmongroup", "salmon-group", "salmon"]
-    assert slug_variants("ABC Fitness") == ["abcfitness", "abc-fitness"]  # без "abc"
-    assert same_company("Cloudflare", "Cloudflare")
-    assert same_company("ASOS.com", "ASOS")          # знаки не считаются
-    assert same_company("Salmon", "Salmon Group")    # префикс засчитан
-    assert not same_company("ABC Fitness", "ThoughtWorks_new")
-    assert not same_company("Contract", "Acme")
-    assert not same_company("", "Acme")
-    assert slug_variants("Plata") == ["plata"]
-    sample = (r'\"id\":\"9699\",\"position\":\"Director of Risk\",\"location\":\"x\",'
-              r'\"company\":{\"name\":\"Wallet\"}')
-    assert JOB_IN_PAYLOAD.findall(sample) == [("9699", "Director of Risk", "Wallet")]
-    assert slugify("Xata.io") == "xataio"
-    assert posted("2026-09-21T08:00:59.084+00:00") == "2026-09-21"
-    assert posted(1788965250140) == "2026-09-09"
-    assert posted("2026-09-15 16:47:19 UTC") == "2026-09-15"
-    assert posted(None) is None and posted("") is None
-    assert slugify("---") is None
-    print("selftest ok")
-
-
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "selftest":
-        selftest()
-    else:
-        new, changed, stats = run(sys.argv[1] if len(sys.argv) > 1 else None)
-        for name, ats, fresh in sorted(stats, key=lambda x: -x[2])[:15]:
-            print(f"{fresh:4}  {name:24} {ats}")
-        shut = db().execute("select count(*) from jobs where closed_at is not null").fetchone()[0]
-        print(f"\nновых вакансий {len(new)}, страниц изменилось {len(changed)}, "
-              f"компаний {len(stats)}, закрытых всего {shut}")
+    new, changed, stats = run(sys.argv[1] if len(sys.argv) > 1 else None)
+    for name, ats, fresh in sorted(stats, key=lambda x: -x[2])[:15]:
+        print(f"{fresh:4}  {name:24} {ats}")
+    shut = db().execute("select count(*) from jobs where closed_at is not null").fetchone()[0]
+    print(f"\nновых вакансий {len(new)}, страниц изменилось {len(changed)}, "
+          f"компаний {len(stats)}, закрытых всего {shut}")

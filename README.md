@@ -70,10 +70,11 @@ too; swap `OPENROUTER_MODEL`, see `.env.example` for figures.
 ## Layout
 
 ```
-storage.py   one connection, the whole schema, migrations, audit log
-jobs.py      collector: registry -> ATS APIs -> jobs, companies
-llm.py       OpenRouter client: one POST, JSON back
-bot.py       Telegram, profiles, scoring, delivery
+src/storage.py   one connection, the whole schema, migrations, audit log
+src/jobs.py      collector: registry -> ATS APIs -> jobs, companies
+src/llm.py       OpenRouter client: one POST, JSON back
+src/bot.py       Telegram, profiles, scoring, delivery
+tests/           no network, no tokens, no fixtures
 ```
 
 Three threads in one process: Telegram polling, collection every 12 hours,
@@ -84,13 +85,12 @@ deleted. Only the resulting profile and the answers stay in the database.
 
 ## Tests
 
-No network, no tokens, no fixtures:
+No network, no tokens, no fixtures — everything runs against an in-memory
+database and hand-written payloads:
 
 ```bash
-python3 storage.py selftest
-python3 llm.py selftest
-python3 jobs.py selftest
-python3 bot.py selftest
+pip install pytest
+python3 -m pytest
 ```
 
 ## License

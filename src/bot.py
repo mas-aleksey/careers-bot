@@ -809,45 +809,5 @@ def main():
             last_deliver = time.time()
 
 
-def selftest():
-    assert NOTIFY_RU["off"] == "выключены"
-    assert json.loads(keyboard(CANCEL_MENU))["inline_keyboard"][0][0]["callback_data"] == "go:cancel"
-    codes = [b[0]["callback_data"] for b in json.loads(keyboard(PROFILE_MENU))["inline_keyboard"]]
-    assert "go:add" in codes and "go:edit" in codes and "set:menu" in codes, codes
-    assert json.loads(keyboard(SETTINGS_MENU))["inline_keyboard"][-1][0]["callback_data"] == "go:profile"
-    kb = json.loads(keyboard(TH_MENU))
-    assert kb["inline_keyboard"][0][0] == {"text": "50%", "callback_data": "th:50"}
-    assert re.match(r"/start\s+(\S+)", "/start abc123").group(1) == "abc123"
-    assert who_hires("roberts.bendins@tabby.ai") == "Roberts Bendins · roberts.bendins@tabby.ai"
-    assert who_hires("Shahida Sayes") == "Shahida Sayes"
-    assert who_hires("") is None and who_hires(None) is None
-    assert age(datetime.now(timezone.utc).date().isoformat()) == "опубликована сегодня"
-    assert age(None) is None
-    assert esc("A & B <c>") == "A &amp; B &lt;c&gt;"
-    assert len(QUESTIONS) == 5 and all(q.endswith("?") or q.endswith(".") for q in QUESTIONS)
-
-    # карточка собирается из базы, без markdown-очередей
-    conn = sqlite3.connect(":memory:")
-    conn.executescript(storage.SCHEMA)
-    conn.execute("INSERT INTO jobs(url,company,title,location,posted,contact) "
-                 "VALUES('http://x','Alpaca','Senior Go','Remote','2024-12-01','Ann Lee')")
-    card = job_card_db(conn, "http://x", 91, "почему берём")
-    assert '<a href="http://x">Senior Go — Alpaca</a>' in card, card
-    assert "<b>Совпадение 91%</b>" in card and "висит" in card and "Ann Lee" in card
-
-    # профиль рендерится из JSON
-    conn.execute("INSERT INTO profiles(tg_id,data,min_match,notify,updated_at) VALUES(1,?,80,'daily','now')",
-                 (json.dumps({"name": "Тест", "role": "Senior Backend", "stack": ["Go", "Python"]}),))
-    r = render_db_profile(conn, 1)
-    assert "<b>Роль:</b> Senior Backend" in r and "Go, Python" in r and "от 80%" in r
-    assert set(HANDLERS) >= {"/start", "/profile", "/settings", "/add", "/edit"}, HANDLERS
-    assert set(ADMIN_HANDLERS) == {"/invite", "/users", "/revoke"}
-    assert not (set(HANDLERS) & set(ADMIN_HANDLERS)), "команда не может быть и общей, и админской"
-    named = {c for c, _ in COMMANDS} | {c for c, _ in ADMIN_COMMANDS}
-    have = {c.lstrip("/") for c in list(HANDLERS) + list(ADMIN_HANDLERS)} | {"cancel"}
-    assert named <= have, f"в меню есть то, чего нет в обработчиках: {named - have}"
-    print("selftest ok")
-
-
 if __name__ == "__main__":
-    selftest() if len(sys.argv) > 1 and sys.argv[1] == "selftest" else main()
+    main()
