@@ -231,7 +231,9 @@ SCORE_SYSTEM = """Ты оцениваешь вакансии под профил
 
 Верни JSON: {"scores": [{"url": "...", "pct": 0-100, "why": "одно предложение"}]}
 Оценивай каждую присланную вакансию, порядок сохраняй. why — по-русски, коротко,
-именно про совпадение с этим кандидатом."""
+именно про совпадение с этим кандидатом.
+
+В ответе только JSON, без пояснений до или после него."""
 
 BATCH = 20
 
@@ -262,14 +264,18 @@ def score_pending(conn, tg_id, limit=200):
         LEFT JOIN matches m ON m.job_url = j.url AND m.tg_id = ?
         WHERE m.job_url IS NULL AND j.closed_at IS NULL
         ORDER BY j.posted DESC NULLS LAST LIMIT ?""", (tg_id, limit)).fetchall()
-    done = 0
+    done, failed = 0, 0
     for i in range(0, len(rows), BATCH):
         chunk = rows[i:i + BATCH]
         try:
             scored = score_batch(profile, chunk)
+            failed = 0
         except Exception as e:
             log("score-error", tg_id, repr(e))
-            break
+            failed += 1
+            if failed >= 3:      # три подряд — что-то с провайдером, ждём прохода
+                break
+            continue
         for url, pct, why in scored:
             conn.execute("INSERT OR REPLACE INTO matches(tg_id,job_url,pct,why,scored_at) "
                          "VALUES(?,?,?,?,?)", (tg_id, url, pct, why, now()))

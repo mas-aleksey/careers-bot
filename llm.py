@@ -57,13 +57,17 @@ def ask(messages, model=None, max_tokens=4096, json_mode=False, attempts=3):
     raise LLMError(last or "неизвестная ошибка")
 
 
-def strip_fence(text):
-    """Модели любят обернуть JSON в ```json ... ``` даже в json-режиме."""
+def extract_json(text):
+    """Достаёт объект из ответа. Модель может обернуть его в ```json, а может
+    сначала объяснить словами и только потом выдать JSON — тогда всё до первой
+    скобки надо отбросить, иначе теряется целая пачка вакансий."""
     t = (text or "").strip()
     if t.startswith("```"):
-        t = t.split("\n", 1)[-1]
-        t = t.rsplit("```", 1)[0]
-    return t.strip()
+        t = t.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    if t.startswith("{"):
+        return t
+    i, j = t.find("{"), t.rfind("}")
+    return t[i:j + 1] if 0 <= i < j else t
 
 
 def ask_json(system, user, model=None, max_tokens=4096):
@@ -72,7 +76,7 @@ def ask_json(system, user, model=None, max_tokens=4096):
     text = ask([{"role": "system", "content": system}, {"role": "user", "content": user}],
                model=model, max_tokens=max_tokens, json_mode=True)
     try:
-        return json.loads(strip_fence(text))
+        return json.loads(extract_json(text))
     except ValueError as e:
         raise LLMError(f"не JSON: {e}: {text[:200]}")
 
@@ -82,8 +86,11 @@ def selftest():
     assert b["model"] and b["messages"][0]["content"] == "hi"
     assert b["response_format"] == {"type": "json_object"}
     assert "response_format" not in build([{"role": "user", "content": "hi"}])
-    assert strip_fence('```json\n{"a":1}\n```') == '{"a":1}'
-    assert strip_fence('{"a":1}') == '{"a":1}'
+    assert extract_json('```json\n{"a":1}\n```') == '{"a":1}'
+    assert extract_json('{"a":1}') == '{"a":1}'
+    # модель объяснила словами и только потом выдала JSON
+    assert extract_json('Все вакансии мимо.\n\n{"scores": []}') == '{"scores": []}'
+    assert json.loads(extract_json('текст {"scores":[{"pct":9}]} хвост'))["scores"][0]["pct"] == 9
     assert 429 in RETRY_CODES and 400 not in RETRY_CODES
     print("selftest ok")
 

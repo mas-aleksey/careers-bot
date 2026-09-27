@@ -71,6 +71,33 @@ def from_url(url):
     return None
 
 
+def same_company(a, b):
+    """Сравнение названий без знаков и регистра. «ABC Fitness» против
+    «ThoughtWorks_new» — разные, и это ловится до того, как чужие вакансии
+    попадут в базу."""
+    norm = lambda x: re.sub(r"[^a-z0-9]", "", (x or "").lower())
+    x, y = norm(a), norm(b)
+    return bool(x) and bool(y) and (x == y or x.startswith(y) or y.startswith(x))
+
+
+def board_owner(ats, slug):
+    """Чьё это на самом деле. None — провайдер имени не отдаёт, проверить нечем."""
+    if ats == "greenhouse":
+        d = get(f"https://boards-api.greenhouse.io/v1/boards/{slug}")
+        return (d or {}).get("name")
+    if ats == "smartrecruiters":
+        d = get(f"https://api.smartrecruiters.com/v1/companies/{slug}/postings")
+        c = ((d or {}).get("content") or [{}])[0].get("company") or {}
+        return c.get("name")
+    if ats == "teamtailor":
+        d = get(f"https://{slug}.teamtailor.com/jobs.json")
+        return (d or {}).get("title")
+    if ats == "recruitee":
+        d = get(f"https://{slug}.recruitee.com/api/offers/")
+        return ((d or {}).get("offers") or [{}])[0].get("company_name")
+    return None
+
+
 def slug_variants(name):
     """Salmon Group сидит под 'salmon-group', Plata — под 'platacard': одной
     склейки мало, пробуем и дефис, и первое слово."""
@@ -78,7 +105,9 @@ def slug_variants(name):
     if not low:
         return []
     out = ["".join(low), "-".join(low)]
-    if len(low) > 1:
+    # первое слово — только если оно само по себе похоже на имя: «abc» от
+    # «ABC Fitness» поймал чужую доску с вакансиями в Пекине
+    if len(low) > 1 and len(low[0]) >= 6:
         out.append(low[0])
     return list(dict.fromkeys(out))
 
@@ -211,9 +240,18 @@ def discover(name, url):
     for s in slug_variants(name):
         for ats in ("ashby", "greenhouse", "lever", "smartrecruiters", "workable",
                     "recruitee", "teamtailor", "pinpoint"):
-            if ADAPTERS[ats](s) is not None:
-                return ats, s
+            if ADAPTERS[ats](s) is None:
+                continue
+            owner = board_owner(ats, s)
+            if owner and not same_company(name, owner):
+                log_skip(name, ats, s, owner)
+                continue
+            return ats, s
     return None
+
+
+def log_skip(name, ats, slug, owner):
+    print(f"  пропуск: {name} -> {ats}/{slug} принадлежит «{owner}»", file=sys.stderr)
 
 
 JOB_IN_PAYLOAD = re.compile(
@@ -370,6 +408,13 @@ def selftest():
     assert from_url("https://elixi.com/careers") is None
     assert slugify("Grid Dynamics") == "griddynamics"
     assert slug_variants("Salmon Group") == ["salmongroup", "salmon-group", "salmon"]
+    assert slug_variants("ABC Fitness") == ["abcfitness", "abc-fitness"]  # без "abc"
+    assert same_company("Cloudflare", "Cloudflare")
+    assert same_company("ASOS.com", "ASOS")          # знаки не считаются
+    assert same_company("Salmon", "Salmon Group")    # префикс засчитан
+    assert not same_company("ABC Fitness", "ThoughtWorks_new")
+    assert not same_company("Contract", "Acme")
+    assert not same_company("", "Acme")
     assert slug_variants("Plata") == ["plata"]
     sample = (r'\"id\":\"9699\",\"position\":\"Director of Risk\",\"location\":\"x\",'
               r'\"company\":{\"name\":\"Wallet\"}')
