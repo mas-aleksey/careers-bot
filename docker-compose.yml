@@ -1,0 +1,14 @@
+name: careers-bot
+
+services:
+  careers-bot:
+    build: .
+    image: careers-bot:latest
+    container_name: careers-bot
+    env_file: .env
+    environment:
+      - TZ=${TZ:-Europe/Lisbon}
+      - BOT_DATA=/data
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
