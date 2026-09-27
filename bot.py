@@ -13,7 +13,6 @@ from pathlib import Path
 TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 API = f"https://api.telegram.org/bot{TOKEN}"
 DATA = Path(os.environ.get("BOT_DATA", "/data"))
-CAREERS = Path(os.environ.get("CAREERS_DIR", "/projects/careers"))
 DB = DATA / "bot.db"
 INVITE_HOURS = 48
 

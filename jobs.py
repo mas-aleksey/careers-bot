@@ -9,15 +9,11 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-# CAREERS_DIR — необязательный каталог владельца: дампы прогонов и телеграм-архив.
-# Без него сборщик работает так же, просто не пишет дампы и не добирает вакансии
-# из телеграма.
-ROOT = Path(os.environ["CAREERS_DIR"]) if os.environ.get("CAREERS_DIR") else None
+
 # BOT_DATA прокинут в контейнер бота как /data. Без него сборщик внутри
 # контейнера создавал вторую базу по хостовому пути — она жила в слое
 # контейнера и умирала с ним.
 DB = Path(os.environ.get("BOT_DATA", "/projects/localhome/services/careers_bot/data")) / "bot.db"
-OUT = (ROOT / ".jobs-inbox") if ROOT else None
 UA = {"User-Agent": "Mozilla/5.0 (careers-bot; +local)"}
 TIMEOUT = 15
 
@@ -277,50 +273,6 @@ def page_hash(url):
     return hashlib.md5(txt.encode()).hexdigest()
 
 
-# --- телеграм как источник для компаний без доски ---------------------------
-
-TG_INBOX = (ROOT / ".tg-inbox") if ROOT else None
-# «[**Senior Backend Engineer (Python)**](https://...) в Elixi» — формат Hirify;
-# «**QA Automation Engineer (Middle)** Findev» — формат WNTD.
-TG_LINKED = re.compile(r"\[\*\*(?P<title>[^\]*]{4,90})\*\*\]\((?P<url>https?://[^)]+)\)")
-TG_BOLD = re.compile(r"\*\*(?P<title>[^*\n]{4,90})\*\*")
-
-
-# Контакт рекрутера, видео и дайджест — не вакансии, хотя лежат в том же посте.
-TG_BAD_URL = re.compile(r"(t\.me/|youtube\.com|youtu\.be|linkedin\.com/(in|posts|feed)/|vk\.cc/)", re.I)
-TG_BAD_TITLE = re.compile(r"(подборк|дайджест|как получить|вакансии за|открытый урок|\[)", re.I)
-
-
-def telegram_jobs(names):
-    """Вакансии компаний, у которых нет читаемой доски: их посты уже лежат в
-    дампах телеграма, название компании стоит рядом с заголовком.
-    Возвращает {компания: [(url, title, где)]}."""
-    if not TG_INBOX or not TG_INBOX.exists() or not names:
-        return {}
-    found = {}
-    for dump in sorted(TG_INBOX.glob("*.md")):
-        for block in re.split(r"\n(?=### )", dump.read_text(errors="ignore")):
-            if not block.startswith("### "):
-                continue
-            for name in names:
-                if not re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", block, re.I):
-                    continue
-                m = TG_LINKED.search(block) or TG_BOLD.search(block)
-                if not m:
-                    continue
-                url = m.groupdict().get("url")
-                if not url:
-                    link = re.search(r"https?://[^\s)\]]+", block)
-                    url = link.group(0) if link else None
-                title = m.group("title").strip()
-                if not url or TG_BAD_URL.search(url) or TG_BAD_TITLE.search(title):
-                    continue
-                if title.lower() == name.lower():        # заголовком стало имя компании
-                    continue
-                found.setdefault(name, []).append((url, title, "telegram", None))
-    return found
-
-
 # --- база -------------------------------------------------------------------
 
 SCHEMA = """
@@ -428,50 +380,8 @@ def run(only=None):
                 closed.append((name, marks))
         stats.append((name, ats, fresh))
 
-    # компании без доски: добираем из телеграм-дампов
-    no_board = [n for (n, _), (_, a, _, _, _) in zip(companies, results) if not a]
-    for name, items in telegram_jobs(no_board).items():
-        fresh = 0
-        for j_url, title, src, pub in items:
-            cur = conn.execute("INSERT OR IGNORE INTO jobs(url,company,title,location,source,first_seen,posted) "
-                               "VALUES(?,?,?,?,?,?,?)", (j_url, name, title, "", src, now, pub))
-            if cur.rowcount:
-                fresh += 1
-                new.append((name, title, "из телеграма", j_url))
-        if fresh:
-            stats = [(n, a, k + fresh) if n == name else (n, a, k) for n, a, k in stats]
     conn.commit()
-    dump(new, changed, stats, now, closed)
     return new, changed, stats
-
-
-def dump(new, changed, stats, now, closed=()):
-    if not OUT:                      # без каталога владельца дампы не пишем
-        return None
-    OUT.mkdir(exist_ok=True)
-    f = OUT / f"{now[:19].replace(':', '-')}.md"
-    lines = [f"# Вакансии из реестра компаний, {now}", ""]
-    if new:
-        lines += ["## Новые вакансии", ""]
-        for company, title, loc, url in sorted(new):
-            lines.append(f"- **{company}** — [{title}]({url}) {('— ' + loc) if loc else ''}")
-        lines.append("")
-    if changed:
-        lines += ["## Страницы изменились, смотреть руками", ""]
-        lines += [f"- {n} — {u}" for n, u in changed] + [""]
-    if closed:
-        lines += ["## Закрылись", ""]
-        lines += [f"- {n}: {k}" for n, k in closed] + [""]
-    lines += ["## Компании", ""]
-    for name, ats, fresh in sorted(stats, key=lambda x: -x[2]):
-        lines.append(f"- {name}: {ats}, новых {fresh}")
-    f.write_text("\n".join(lines))
-    try:
-        st = ROOT.stat()
-        os.chown(f, st.st_uid, st.st_gid)
-    except OSError:
-        pass
-    return f
 
 
 def selftest():
@@ -487,17 +397,6 @@ def selftest():
               r'\"company\":{\"name\":\"Wallet\"}')
     assert JOB_IN_PAYLOAD.findall(sample) == [("9699", "Director of Risk", "Wallet")]
     assert slugify("Xata.io") == "xataio"
-    post = ("### 2026-09-23 16:08  msg 239287\n"
-            "[**Senior Backend Engineer (Python)**](https://hirify.me/jobs/1143735-x) в Elixi\n")
-    m = TG_LINKED.search(post)
-    assert m.group("title") == "Senior Backend Engineer (Python)"
-    assert m.group("url").endswith("1143735-x")
-    assert re.search(r"(?<![\w-])Elixi(?![\w-])", post)
-    assert not re.search(r"(?<![\w-])Elixi(?![\w-])", "Fullstack Elixir Engineer")
-    assert TG_BAD_URL.search("https://t.me/MariiaDia")
-    assert TG_BAD_URL.search("https://www.youtube.com/watch?v=x")
-    assert not TG_BAD_URL.search("https://hirify.me/jobs/1143735-x")
-    assert TG_BAD_TITLE.search("Подборка компаний в Нидерландах")
     assert posted("2026-09-21T08:00:59.084+00:00") == "2026-09-21"
     assert posted(1788965250140) == "2026-09-09"
     assert posted("2026-09-15 16:47:19 UTC") == "2026-09-15"
