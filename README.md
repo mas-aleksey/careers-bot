@@ -1,66 +1,98 @@
 # careers-bot
 
-Телеграм-бот, который следит за карьерными страницами компаний и присылает
-только те вакансии, что подходят конкретному человеку.
+A Telegram bot that watches companies' career pages and sends a person only the
+openings that actually fit them.
 
-Человек присылает резюме и отвечает на пять вопросов. Бот собирает профиль,
-раз в двенадцать часов обходит доски компаний, оценивает новое под профиль и
-шлёт то, что прошло порог.
+You send a CV and answer five short questions. The bot builds a profile, walks
+company job boards twice a day, scores new openings against your profile and
+delivers whatever clears your threshold.
 
-## Что умеет
+Self-hosted, long-polling (no public URL or webhook needed), SQLite for state.
 
-- **Девять ATS по публичным API**: Greenhouse, Ashby, Lever (включая европейский
-  хост), SmartRecruiters, Workable, Recruitee, Teamtailor, Pinpoint, плюс разбор
-  вакансий, зашитых в саму страницу (Next.js payload).
-- **Компании без читаемой доски** — следит за изменением страницы по хешу.
-- **Дата публикации** там, где её отдаёт провайдер: в карточке видно
-  «опубликована 3 дня назад» или «висит 1 г. 10 мес.».
-- **Закрытые вакансии** помечаются, когда пропадают с доски, и больше не шлются.
-- **Вилка и контакт нанимающего** — если провайдер их отдаёт.
-- Вход по приглашению, порог совпадения и режим уведомлений настраиваются
-  кнопками.
+## What it does
 
-## Запуск
+| | |
+| --- | --- |
+| `/profile` | how the bot understood you, with buttons |
+| `/cv` | send a new CV, profile is rebuilt |
+| `/edit <text>` | fix the profile in plain words: "I'd consider hybrid in Lisbon" |
+| `/add <link or name>` | track a company: it finds the job board itself |
+| `/settings` | match threshold and delivery mode, as buttons |
+| `/pause`, `/resume` | mute and unmute |
+| `/invite`, `/users`, `/revoke` | admin only |
+
+## Where the jobs come from
+
+Nine ATS providers through their public APIs, no keys required: **Greenhouse,
+Ashby, Lever** (including the EU host), **SmartRecruiters, Workable, Recruitee,
+Teamtailor, Pinpoint**, plus openings embedded straight into a Next.js page.
+
+Given a company name or a link, the bot tries each provider until a board
+answers. Roughly half of the companies you throw at it turn out to have one.
+For the rest it watches the career page and reports when it changes.
+
+What it stores per opening, when the provider exposes it: publication date
+(shown as "posted 3 days ago" or "open for 1 y 10 mo"), salary range, hiring
+manager, workplace type. Openings that disappear from a board are marked closed
+and never sent.
+
+## Matching
+
+A hundred points split three ways: stack and domain 40, role and seniority 35,
+location and employment 25. Money is not part of the score — ranges are
+published for about one opening in seven, so scoring them would just shift the
+scale for everyone equally.
+
+Blockers score a flat zero rather than a deduction: seniority below yours, a
+country you can't be hired from, onsite or relocation when you don't want it,
+a different profession. Without that rule a perfect stack match in a city you
+can't move to would still clear an 80% threshold.
+
+## Setup
 
 ```bash
-cp .env.example .env     # вписать токен бота и ключ OpenRouter
+cp .env.example .env     # bot token from @BotFather, OpenRouter key
 chmod 600 .env
 docker compose up -d --build
 docker compose logs -f careers-bot
 ```
 
-Первый, кто напишет боту, становится администратором — это записывается один
-раз. Дальше вход только по коду из `/invite`, код живёт 48 часов.
+The first person to message the bot becomes the admin — recorded once. After
+that access is invite-only: `/invite` mints a code that lives 48 hours.
 
-Компании добавляются командой `/add` или кнопкой в `/profile`: ссылка на
-карьерную страницу, ссылка на вакансию или просто название. Бот сам найдёт
-доску, если она есть.
+## Cost
 
-## Сколько стоит
+The model is called twice: once to build a profile, then in batches of twenty
+to score new openings. At a typical load — fifty new openings a day — that is
+about **$3/month** on Claude Sonnet 5 through OpenRouter. Cheaper models work
+too; swap `OPENROUTER_MODEL`, see `.env.example` for figures.
 
-Модель вызывается дважды: при сборке профиля и при оценке новых вакансий
-пачками по двадцать. На типичной нагрузке — полсотни новых вакансий в день —
-выходит около **$3 в месяц** на Claude Sonnet 5. Дешевле можно, модель меняется
-строкой `OPENROUTER_MODEL`; ориентиры в `.env.example`.
-
-## Как устроено
+## Layout
 
 ```
-jobs.py   сборщик: реестр компаний -> API досок -> таблицы jobs, companies
-llm.py    клиент OpenRouter: один POST, ответ разбирается в JSON
-bot.py    телеграм, профили, оценка, рассылка
+storage.py   one connection, the whole schema, migrations, audit log
+jobs.py      collector: registry -> ATS APIs -> jobs, companies
+llm.py       OpenRouter client: one POST, JSON back
+bot.py       Telegram, profiles, scoring, delivery
 ```
 
-Три потока в одном процессе: опрос телеграма, сбор вакансий раз в 12 часов,
-оценка раз в 15 минут. Состояние целиком в `data/bot.db`.
+Three threads in one process: Telegram polling, collection every 12 hours,
+scoring every 15 minutes. All state lives in `data/bot.db`.
 
-Резюме не хранится: PDF попадает в `/tmp`, из него достаётся текст, файл
-удаляется. В базе остаётся только собранный профиль и ответы на вопросы.
+CVs are not kept: the PDF lands in `/tmp`, text is extracted, the file is
+deleted. Only the resulting profile and the answers stay in the database.
 
-## Проверка без сети и без токенов
+## Tests
+
+No network, no tokens, no fixtures:
 
 ```bash
-python3 bot.py selftest
-python3 jobs.py selftest
+python3 storage.py selftest
 python3 llm.py selftest
+python3 jobs.py selftest
+python3 bot.py selftest
 ```
+
+## License
+
+MIT
