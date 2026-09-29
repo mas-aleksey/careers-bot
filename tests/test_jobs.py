@@ -117,3 +117,19 @@ def test_collector_does_not_overwrite_who_added(monkeypatch):
     who, when = storage.connect().execute(
         "SELECT added_by, added_at FROM companies WHERE name='Omega'").fetchone()
     assert (who, when) == ("703432434", "2026-09-01")
+
+
+def test_workable_empty_account_is_not_a_failure(monkeypatch):
+    """Аккаунт есть, вакансий ноль — это пустая доска, а не сбой. Vivid Money
+    именно такой: путать его с 429 значит врать в отчёте о здоровье."""
+    import jobs
+
+    def fake_get(url, want_json=True, with_code=False):
+        body = {"name": "Vivid Money", "jobs": []} if url.endswith("vivid") else None
+        code = 200 if body else 404
+        return (body, code) if with_code else body
+
+    monkeypatch.setattr(jobs, "get", fake_get)
+    jobs._wk_suffix.clear()
+    assert jobs.workable("vivid") == []          # пусто, но доска жива
+    assert jobs.workable("неттакого") is None    # вообще не дозвонились

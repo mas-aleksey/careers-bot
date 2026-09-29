@@ -209,16 +209,21 @@ def workable(s):
     # аккаунты часто заведены с суффиксом: cloudlinux пустой, cloudlinux-1 — 84
     # вакансии. Найденный запоминаем: три пробы каждый цикл — это и есть тот
     # всплеск, на котором Cloudflare отвечает 1015 и компания пропадает.
+    empty, throttled = False, False
     for cand in ([_wk_suffix[s]] if s in _wk_suffix else (s, f"{s}-1", f"{s}-2")):
         d, code = get(f"https://apply.workable.com/api/v1/widget/accounts/{cand}", with_code=True)
-        if isinstance(d, dict) and d.get("name") and d.get("jobs"):
-            _wk_suffix[s] = cand
-            return [(j["url"], j["title"], j.get("location", ""),
-                     posted(j.get("published_on") or j.get("created_at"))) for j in d["jobs"]]
+        if isinstance(d, dict) and d.get("name"):
+            if d.get("jobs"):
+                _wk_suffix[s] = cand
+                return [(j["url"], j["title"], j.get("location", ""),
+                         posted(j.get("published_on") or j.get("created_at"))) for j in d["jobs"]]
+            empty = True   # аккаунт есть, вакансий нет — это не сбой, а пустая доска
         if code == 429:
+            throttled = True
             break          # уже притормозили: остальные суффиксы только углубят бан
     _wk_suffix.pop(s, None)       # запомненный перестал отвечать — пробуем все заново
-    return None
+    # [] и None читаются по-разному: пустая доска против «не дозвонились»
+    return None if throttled or not empty else []
 
 
 def recruitee(s):
