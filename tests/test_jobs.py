@@ -197,3 +197,18 @@ def test_named_run_ignores_the_freshness_window(monkeypatch):
                         lambda s: hit.append(s) or [(f"u/{s}", "Backend", "Remote", None)])
     jobs.run(only="Justnow")
     assert hit == ["justnow"], hit
+
+
+def test_discover_ignores_an_empty_board(monkeypatch):
+    """Аккаунт на доске есть, вакансий нет — это не та компания. Так Atlassian
+    и Revolut получили чужие доски на Workable."""
+    import jobs
+    monkeypatch.setattr(jobs, "from_url", lambda u: None)
+    monkeypatch.setattr(jobs, "slug_variants", lambda n: ["zeta"])
+    monkeypatch.setattr(jobs, "board_owner", lambda *a: None)
+    for name in jobs.ADAPTERS:
+        monkeypatch.setitem(jobs.ADAPTERS, name, lambda s: [])
+    assert jobs.discover("Zeta", "") is None
+
+    monkeypatch.setitem(jobs.ADAPTERS, "lever", lambda s: [("u", "Backend", "Remote", None)])
+    assert jobs.discover("Zeta", "") == ("lever", "zeta")

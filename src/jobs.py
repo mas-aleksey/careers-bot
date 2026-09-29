@@ -282,7 +282,10 @@ def discover(name, url):
     for s in slug_variants(name):
         for ats in ("ashby", "greenhouse", "lever", "smartrecruiters", "workable",
                     "recruitee", "teamtailor", "pinpoint"):
-            if ADAPTERS[ats](s) is None:
+            # Пустая доска — не доказательство, что это та самая компания:
+            # Workable заводит аккаунты под кучу имён, и Atlassian с Revolut
+            # получили чужие. Для discovery годится только доска с вакансиями.
+            if not ADAPTERS[ats](s):
                 continue
             owner = board_owner(ats, s)
             if owner and not same_company(name, owner):
