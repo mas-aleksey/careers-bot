@@ -27,3 +27,13 @@ def test_late_columns_added_to_old_base():
 
 def test_now_is_utc_iso():
     assert storage.now().endswith("+00:00")
+
+
+def test_dedup_key_ignores_case_punctuation_and_location():
+    """Одна вакансия под десятью url отличается только локацией — она в ключ
+    не входит, иначе Mozilla Add-Ons уедет десятью карточками."""
+    import storage
+    k = storage.dedup_key("Mozilla", "Senior Software Engineer, Add-Ons")
+    assert k == storage.dedup_key("mozilla ", "senior software engineer add-ons")
+    assert k != storage.dedup_key("Mozilla", "Senior Software Engineer, Crypto")
+    assert storage.dedup_key("", "") == "|"

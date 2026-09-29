@@ -133,3 +133,67 @@ def test_workable_empty_account_is_not_a_failure(monkeypatch):
     jobs._wk_suffix.clear()
     assert jobs.workable("vivid") == []          # пусто, но доска жива
     assert jobs.workable("неттакого") is None    # вообще не дозвонились
+
+
+XATA_HTML = '''<h2>Open positions</h2><div class="flex flex-col gap-4">
+<a class="group flex" href="/careers/7952382"><span class="text-foreground">Forward Deployed Engineer</span><span class="sr-only"> — </span><span class="text-muted">Remote</span></a>
+<a class="group flex" href="/careers/7928089"><span class="text-foreground">Senior Backend Engineer (Go/Rust)</span><span class="sr-only"> — </span><span class="text-muted">Remote</span></a>
+</div><a href="/careers">Все вакансии</a><a href="/blog/2024">Блог</a>'''
+
+
+def test_linked_jobs_reads_own_site_listing():
+    """Сайт сам перечисляет вакансии ссылками — так устроена Xata: доска на
+    Teamtailor, но публичного фида нет. Ссылки без номера вакансии не берём."""
+    import jobs
+    got = jobs.linked_jobs(XATA_HTML, "https://xata.io/careers")
+    assert [(u, t, loc) for u, t, loc, _ in got] == [
+        ("https://xata.io/careers/7952382", "Forward Deployed Engineer", "Remote"),
+        ("https://xata.io/careers/7928089", "Senior Backend Engineer (Go/Rust)", "Remote"),
+    ], got
+
+
+def test_linked_jobs_skips_non_job_links():
+    """/careers и /blog/2024 — не вакансии: нужен числовой id в пути."""
+    import jobs
+    assert jobs.linked_jobs('<a href="/careers">Вакансии</a><a href="/blog/2024">Блог</a>',
+                            "https://xata.io/careers") == []
+
+
+def test_fresh_company_is_skipped_but_stale_one_is_not(monkeypatch):
+    """Бот перезапускается чаще, чем обновляются доски. Проверенную час назад
+    компанию не трогаем, проверенную вчера — трогаем."""
+    from datetime import datetime, timedelta, timezone
+    import jobs, storage
+    conn = storage.connect()
+    hour = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="seconds")
+    day = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat(timespec="seconds")
+    conn.execute("INSERT OR REPLACE INTO companies(name,page_url,ats,slug,checked_at) "
+                 "VALUES('Fresh','https://f.test','lever','fresh',?)", (hour,))
+    conn.execute("INSERT OR REPLACE INTO companies(name,page_url,ats,slug,checked_at) "
+                 "VALUES('Stale','https://s.test','lever','stale',?)", (day,))
+    conn.commit()
+
+    hit = []
+    monkeypatch.setitem(jobs.ADAPTERS, "lever",
+                        lambda s: hit.append(s) or [(f"u/{s}", "Backend", "Remote", None)])
+    new, changed, stats, skipped = jobs.run()
+
+    assert "stale" in hit and "fresh" not in hit, hit
+    assert skipped >= 1
+
+
+def test_named_run_ignores_the_freshness_window(monkeypatch):
+    """Запуск по имени — явная просьба, окно её не отменяет."""
+    from datetime import datetime, timezone
+    import jobs, storage
+    conn = storage.connect()
+    conn.execute("INSERT OR REPLACE INTO companies(name,page_url,ats,slug,checked_at) "
+                 "VALUES('Justnow','https://j.test','lever','justnow',?)",
+                 (datetime.now(timezone.utc).isoformat(timespec="seconds"),))
+    conn.commit()
+
+    hit = []
+    monkeypatch.setitem(jobs.ADAPTERS, "lever",
+                        lambda s: hit.append(s) or [(f"u/{s}", "Backend", "Remote", None)])
+    jobs.run(only="Justnow")
+    assert hit == ["justnow"], hit

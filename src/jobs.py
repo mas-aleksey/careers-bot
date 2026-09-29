@@ -6,7 +6,7 @@
 """
 import hashlib, json, os, re, sys, threading, time, urllib.error, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import storage
@@ -329,16 +329,46 @@ def next_data(html):
     return found or None
 
 
+# Вакансия как обычная ссылка на свой же сайт: /careers/7928089, /jobs/1234.
+# Внутри ссылки название и локация отдельными кусками текста.
+LINKED_JOB = re.compile(
+    r'<a[^>]+href="(?P<href>[^"]*/(?:careers|jobs|vacancies|positions)/\d{4,}[^"]*)"[^>]*>'
+    r'(?P<body>.{0,600}?)</a>', re.S)
+SEPARATORS = {"—", "-", "–", "·", "|", ",", ""}
+
+
+def linked_jobs(html, url):
+    """Ступень 3, общий случай: сайт сам перечисляет вакансии ссылками.
+    Так устроена Xata — доска у неё на Teamtailor, но публичного фида нет,
+    зато собственная страница читается без всякого API."""
+    root = re.match(r"https?://[^/]+", url)
+    if not root:
+        return []
+    out, seen = [], set()
+    for m in LINKED_JOB.finditer(html):
+        parts = [t.strip() for t in re.split(r"<[^>]+>", m.group("body"))]
+        parts = [t for t in parts if t not in SEPARATORS]
+        if not parts:
+            continue
+        href = m.group("href")
+        full = href if href.startswith("http") else root.group(0) + href
+        if full in seen:                 # одна вакансия часто и в списке, и в JSON страницы
+            continue
+        seen.add(full)
+        out.append((full, parts[0], parts[-1] if len(parts) > 1 else "", None))
+    return out
+
+
 def embedded(url):
     """Ступень 3: вакансии лежат в HTML, а не в API. Так устроены top.co
-    (свой формат) и betby.com (__NEXT_DATA__)."""
+    (свой формат), betby.com (__NEXT_DATA__) и xata.io (ссылки на свой сайт)."""
     html = get(url, want_json=False)
     if not html:
         return None
     base = url.rstrip("/")
     out = [(f"{base}/{jid}", title.strip(), company.strip(), None)
            for jid, title, company in JOB_IN_PAYLOAD.findall(html)]
-    return out or next_data(html)
+    return out or next_data(html) or linked_jobs(html, url)
 
 
 def diagnose(ats, slug, url):
@@ -396,13 +426,26 @@ def collect(name, url, cache):
     return name, None, None, None, page_hash(url)
 
 
+# Бот перезапускается чаще, чем доски обновляются: сборщик стартует вместе с ним
+# и гонит весь реестр заново. Компанию, проверенную недавно, пропускаем.
+FRESH_HOURS = 4
+
+
 def run(only=None):
-    """only — подстрока имени: гонять весь реестр ради одной компании незачем."""
+    """only — подстрока имени: гонять весь реестр ради одной компании незачем.
+    По имени окно свежести не действует — явная просьба важнее экономии."""
     conn = db()
     companies = registry_db(conn)
+    now = storage.now()
+    skipped = 0
     if only:
         companies = [c for c in companies if only.lower() in c[0].lower()]
-    now = storage.now()
+    else:
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=FRESH_HOURS)).isoformat(timespec="seconds")
+        fresh = {n for (n,) in conn.execute(
+            "SELECT name FROM companies WHERE checked_at > ?", (cutoff,))}
+        skipped = sum(1 for c in companies if c[0] in fresh)
+        companies = [c for c in companies if c[0] not in fresh]
     cache = {n: (a, s) for n, a, s in conn.execute(
         "SELECT name, ats, slug FROM companies WHERE ats IS NOT NULL")}
     # discovery последовательно и один раз на компанию: параллельно ATS отдают 429
@@ -450,8 +493,10 @@ def run(only=None):
             who = row[5] if len(row) > 5 else None
             if not j_url:
                 continue
-            cur = conn.execute("INSERT OR IGNORE INTO jobs(url,company,title,location,source,first_seen,posted,salary,contact) "
-                               "VALUES(?,?,?,?,?,?,?,?,?)", (j_url, name, title, loc, ats, now, pub, pay, who))
+            cur = conn.execute("INSERT OR IGNORE INTO jobs(url,company,title,location,source,first_seen,posted,salary,contact,dedup) "
+                               "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                               (j_url, name, title, loc, ats, now, pub, pay, who,
+                                storage.dedup_key(name, title)))
             if not cur.rowcount and who:
                 conn.execute("UPDATE jobs SET contact=? WHERE url=? AND contact IS NULL", (who, j_url))
             if not cur.rowcount and pay:
@@ -474,13 +519,13 @@ def run(only=None):
         stats.append((name, ats, fresh))
 
     conn.commit()
-    return new, changed, stats
+    return new, changed, stats, skipped
 
 
 if __name__ == "__main__":
-    new, changed, stats = run(sys.argv[1] if len(sys.argv) > 1 else None)
+    new, changed, stats, skipped = run(sys.argv[1] if len(sys.argv) > 1 else None)
     for name, ats, fresh in sorted(stats, key=lambda x: -x[2])[:15]:
         print(f"{fresh:4}  {name:24} {ats}")
     shut = db().execute("select count(*) from jobs where closed_at is not null").fetchone()[0]
     print(f"\nновых вакансий {len(new)}, страниц изменилось {len(changed)}, "
-          f"компаний {len(stats)}, закрытых всего {shut}")
+          f"компаний {len(stats)}, пропущено свежих {skipped}, закрытых всего {shut}")

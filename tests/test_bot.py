@@ -74,3 +74,21 @@ def test_admin_commands_are_separate():
 
 def test_html_escaped_in_cards():
     assert bot.esc("A & B <c>") == "A &amp; B &lt;c&gt;"
+
+
+def test_spread_scores_whole_duplicate_group():
+    """Оценили одну из группы — получили все. Иначе девять братьев остаются
+    неоценёнными и уходят в следующий платный проход."""
+    import bot, storage
+    conn = storage.connect()
+    for n, loc in enumerate(("Remote Spain", "Remote Germany", "Remote UK")):
+        conn.execute("INSERT OR REPLACE INTO jobs(url,company,title,location,dedup) VALUES(?,?,?,?,?)",
+                     (f"https://t/{n}", "Mozilla", "SWE, Add-Ons", loc,
+                      storage.dedup_key("Mozilla", "SWE, Add-Ons")))
+    conn.commit()
+
+    bot.spread(conn, 777, "https://t/0", 84, "подходит")
+    conn.commit()
+
+    got = conn.execute("SELECT job_url, pct FROM matches WHERE tg_id=777 ORDER BY job_url").fetchall()
+    assert got == [("https://t/0", 84), ("https://t/1", 84), ("https://t/2", 84)], got

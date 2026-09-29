@@ -4,7 +4,7 @@
 Раньше bot.py и jobs.py заводили соединение каждый по-своему — с разными
 таймаутами и своей половиной схемы. Теперь это одно место.
 """
-import os, sqlite3
+import os, re, sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -53,7 +53,21 @@ LATE_COLUMNS = [
     ("companies", "last_error TEXT"),
     # откуда компания взялась: tg_id человека, "telegram" из добора, "collector"
     ("companies", "added_by TEXT"), ("companies", "added_at TEXT"),
+    # одна вакансия лежит на доске отдельной строкой под каждую страну: у Mozilla
+    # «Senior Software Engineer, Add-Ons» — десять url. Ключ схлопывает их в одну
+    ("jobs", "dedup TEXT"), ("sent", "dedup TEXT"),
 ]
+INDEXES = [
+    "CREATE INDEX IF NOT EXISTS jobs_dedup ON jobs(dedup)",
+    "CREATE INDEX IF NOT EXISTS sent_dedup ON sent(tg_id, dedup)",
+]
+
+
+def dedup_key(company, title):
+    """Компания плюс должность без знаков и регистра. Локация не входит намеренно:
+    именно она и различает десять копий одной вакансии."""
+    norm = lambda x: re.sub(r"[^a-z0-9]", "", (x or "").lower())
+    return f"{norm(company)}|{norm(title)}"
 
 
 def now():
@@ -70,6 +84,8 @@ def connect():
             c.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
         except sqlite3.OperationalError:
             pass
+    for sql in INDEXES:
+        c.execute(sql)
     c.commit()
     return c
 

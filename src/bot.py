@@ -290,16 +290,29 @@ def score_batch(profile, rows):
             for x in out.get("scores", []) if x.get("url") in known]
 
 
+def spread(conn, tg_id, url, pct, why):
+    """Оценка ложится на всю группу дублей разом: одна и та же вакансия под
+    десятью ссылками должна и оцениваться, и не отправляться одинаково."""
+    conn.execute("""
+        INSERT OR REPLACE INTO matches(tg_id, job_url, pct, why, scored_at)
+        SELECT ?, url, ?, ?, ? FROM jobs
+        WHERE dedup = (SELECT dedup FROM jobs WHERE url = ?) AND closed_at IS NULL""",
+        (tg_id, pct, why, now(), url))
+
+
 def score_pending(conn, tg_id, limit=200):
     """Оценивает то, что для этого профиля ещё не оценено. Закрытые пропускаем:
     платить за оценку снятой вакансии незачем."""
     profile = get_profile(conn, tg_id)
     if not profile:
         return 0
+    # По одной вакансии из группы дублей: у Mozilla десять url на одну должность,
+    # платить за неё десять раз незачем. Результат раскладывается на всю группу.
     rows = conn.execute("""
         SELECT j.url, j.company, j.title, j.location FROM jobs j
         LEFT JOIN matches m ON m.job_url = j.url AND m.tg_id = ?
         WHERE m.job_url IS NULL AND j.closed_at IS NULL
+        GROUP BY j.dedup
         ORDER BY j.posted DESC NULLS LAST LIMIT ?""", (tg_id, limit)).fetchall()
     # Первый проход дешёвой моделью: отсеянным сразу ноль, без оплаты основной.
     survivors = []
@@ -313,8 +326,7 @@ def score_pending(conn, tg_id, limit=200):
         survivors += keep
         for url, *_ in part:
             if url not in {u for u, *_ in keep}:
-                conn.execute("INSERT OR REPLACE INTO matches(tg_id,job_url,pct,why,scored_at) "
-                             "VALUES(?,?,0,'профессия или география мимо',?)", (tg_id, url, now()))
+                spread(conn, tg_id, url, 0, "профессия или география мимо")
     conn.commit()
     if len(rows) != len(survivors):
         log("triage", tg_id, f"{len(survivors)} из {len(rows)}")
@@ -337,8 +349,7 @@ def score_pending(conn, tg_id, limit=200):
         if len(scored) < len(chunk):
             log("score-short", tg_id, f"{len(scored)} из {len(chunk)}")
         for url, pct, why in scored:
-            conn.execute("INSERT OR REPLACE INTO matches(tg_id,job_url,pct,why,scored_at) "
-                         "VALUES(?,?,?,?,?)", (tg_id, url, pct, why, now()))
+            spread(conn, tg_id, url, pct, why)
         conn.commit()
         done += len(scored)
     if done:
@@ -468,14 +479,15 @@ def deliver(conn):
             SELECT m.job_url, m.pct, m.why FROM matches m
             JOIN jobs j ON j.url = m.job_url
             WHERE m.tg_id = ? AND m.pct >= ? AND j.closed_at IS NULL
-              AND NOT EXISTS (SELECT 1 FROM sent s
-                              WHERE s.tg_id = m.tg_id AND s.job_url = m.job_url)
+              AND NOT EXISTS (SELECT 1 FROM sent s WHERE s.tg_id = m.tg_id
+                              AND (s.job_url = m.job_url OR s.dedup = j.dedup))
+            GROUP BY j.dedup
             ORDER BY m.pct DESC LIMIT 20""", (tg_id, floor)).fetchall()
         for url, pct, why in rows:
             card = job_card_db(conn, url, pct, why)
             if card and send(tg_id, card, html=True):
-                conn.execute("INSERT INTO sent(tg_id,job_url,sent_at) VALUES(?,?,?)",
-                             (tg_id, url, now()))
+                conn.execute("INSERT INTO sent(tg_id,job_url,sent_at,dedup) VALUES(?,?,?,"
+                             "(SELECT dedup FROM jobs WHERE url=?))", (tg_id, url, now(), url))
                 conn.execute("UPDATE users SET last_notified=? WHERE tg_id=?", (now(), tg_id))
                 count += 1
                 time.sleep(0.4)
