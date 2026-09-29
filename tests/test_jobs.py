@@ -237,3 +237,18 @@ def test_workable_collapses_city_rows_and_keeps_countries():
     by_url = {u: (t, loc) for u, t, loc, _ in got}
     assert by_url["https://w/j/AAA"] == ("Platform Engineer", "Remote: United States, Canada")
     assert by_url["https://w/j/BBB"] == ("Kernel Developer", "Poland")
+
+
+def test_teamtailor_takes_location_from_jobposting():
+    """В фиде Teamtailor нет ни `location`, ни `summary` — локация лежит в
+    приложенном JobPosting. 126 вакансий числились безадресными."""
+    import jobs
+    item = {"title": "Senior Java", "url": "https://t/1", "date_published": "2026-09-29",
+            "_jobposting": {"jobLocation": [
+                {"address": {"addressLocality": "Banja Luka", "addressCountry": "BA"}},
+                {"address": {"addressLocality": "Beograd", "addressCountry": "RS"}},
+                {"address": {"addressLocality": "Banja Luka", "addressCountry": "BA"}}]}}
+    assert jobs.tt_place(item) == "Banja Luka, BA · Beograd, RS"
+    assert jobs.tt_place({"_jobposting": "{'jobLocation': [{'address': {'addressCountry': 'PL'}}]}"}) == "PL"
+    assert jobs.tt_place({}) == ""
+    assert jobs.tt_place({"_jobposting": "не json"}) == ""

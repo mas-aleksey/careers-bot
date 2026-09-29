@@ -4,7 +4,7 @@
 Компании добавляются через бота и живут в таблице companies. У кого нет
 читаемой доски — следим за изменением карьерной страницы по хешу.
 """
-import hashlib, json, os, re, sys, threading, time, urllib.error, urllib.parse, urllib.request
+import ast, hashlib, json, os, re, sys, threading, time, urllib.error, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -257,13 +257,37 @@ def recruitee(s):
              posted(j.get("published_at") or j.get("created_at"))) for j in d["offers"]]
 
 
+def tt_place(item):
+    """Локация Teamtailor лежит не в самом фиде, а в приложенном к нему
+    JobPosting по schema.org. Ключа `summary`, который читался раньше, в фиде
+    нет вовсе — 126 вакансий числились безадресными и шли в дорогую оценку."""
+    jp = item.get("_jobposting")
+    if isinstance(jp, str):
+        try:
+            jp = ast.literal_eval(jp)
+        except (ValueError, SyntaxError):
+            return ""
+    if not isinstance(jp, dict):
+        return ""
+    places = jp.get("jobLocation") or []
+    if isinstance(places, dict):
+        places = [places]
+    out = []
+    for pl in places:
+        a = (pl or {}).get("address") or {}
+        where = ", ".join(x for x in (a.get("addressLocality"), a.get("addressCountry")) if x)
+        if where and where not in out:
+            out.append(where)
+    return " · ".join(out[:4])
+
+
 def teamtailor(s):
     """Отдаёт JSON Feed: вакансии лежат в items, а не в jobs."""
     d = get(f"https://{s}.teamtailor.com/jobs.json")
     if not isinstance(d, dict):
         return None
     items = d.get("items") or d.get("jobs") or []
-    return [(j.get("url", ""), j.get("title", ""), j.get("summary", "")[:60],
+    return [(j.get("url", ""), j.get("title", ""), tt_place(j),
              posted(j.get("date_published"))) for j in items] or None
 
 
