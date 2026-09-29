@@ -4,7 +4,7 @@
 Компании добавляются через бота и живут в таблице companies. У кого нет
 читаемой доски — следим за изменением карьерной страницы по хешу.
 """
-import hashlib, json, os, re, sys, time, urllib.error, urllib.request
+import hashlib, json, os, re, sys, threading, time, urllib.error, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,34 +14,62 @@ import storage
 
 UA = {"User-Agent": "Mozilla/5.0 (careers-bot; +local)"}
 TIMEOUT = 15
+# Минимальный зазор между запросами к одному хосту. Пять потоков попадают на
+# один ATS одновременно, и он отдаёт 429: Workable ловил его регулярно, потому
+# что пробует ещё и три суффикса подряд. Подкручивать здесь, если снова полезет.
+GAP = 0.6
+# Cloudflare у Workable даёт 1015 на всплеск, а не на средний темп: три пробы
+# подряд его уже злят. Таблица для тех, кому общего зазора мало.
+GAPS = {"apply.workable.com": 3.0}
+_last, _gate = {}, threading.Lock()
 
 
-def get(url, want_json=True):
+def space_out(url):
+    """Держит зазор между запросами к одному хосту. Спим вне замка, иначе
+    потоки к разным ATS ждут друг друга без причины."""
+    host = urllib.parse.urlsplit(url).netloc
+    with _gate:
+        start = max(_last.get(host, 0.0), time.monotonic())
+        _last[host] = start + GAPS.get(host, GAP)
+    delay = start - time.monotonic()
+    if delay > 0:
+        time.sleep(delay)
+
+
+def get(url, want_json=True, with_code=False):
     """404 — честный ответ «доски нет». 429 и 5xx — временные, один повтор:
-    при восьми потоках ATS отдают 429, и компания молча теряется до следующего дня."""
-    raw = None
+    при восьми потоках ATS отдают 429, и компания молча теряется до следующего дня.
+
+    with_code — вернуть (тело, код). Без кода 404 «такого слага нет» и 429 «нас
+    притормозили» неразличимы, и бот после бана дозванивается дальше, углубляя его."""
+    raw, code = None, 0
     for attempt in (0, 1):
         try:
-            raw = urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=TIMEOUT).read()
+            space_out(url)
+            r = urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=TIMEOUT)
+            raw, code = r.read(), r.status
             break
         except urllib.error.HTTPError as e:
+            code = e.code
             if e.code in (429, 500, 502, 503, 504) and attempt == 0:
                 time.sleep(3)
                 continue
-            return None
+            break
         except (urllib.error.URLError, OSError):
             if attempt == 0:
                 time.sleep(2)
                 continue
-            return None
-    if raw is None:
-        return None
-    if not want_json:
-        return raw.decode("utf-8", "ignore")
-    try:
-        return json.loads(raw)
-    except ValueError:
-        return None
+            break
+    body = None
+    if raw is not None:
+        if want_json:
+            try:
+                body = json.loads(raw)
+            except ValueError:
+                body = None
+        else:
+            body = raw.decode("utf-8", "ignore")
+    return (body, code) if with_code else body
 
 
 # --- реестр -----------------------------------------------------------------
@@ -174,13 +202,22 @@ def smartrecruiters(s):
     return out
 
 
+_wk_suffix = {}
+
+
 def workable(s):
-    # аккаунты часто заведены с суффиксом: cloudlinux пустой, cloudlinux-1 — 84 вакансии
-    for cand in (s, f"{s}-1", f"{s}-2"):
-        d = get(f"https://apply.workable.com/api/v1/widget/accounts/{cand}")
+    # аккаунты часто заведены с суффиксом: cloudlinux пустой, cloudlinux-1 — 84
+    # вакансии. Найденный запоминаем: три пробы каждый цикл — это и есть тот
+    # всплеск, на котором Cloudflare отвечает 1015 и компания пропадает.
+    for cand in ([_wk_suffix[s]] if s in _wk_suffix else (s, f"{s}-1", f"{s}-2")):
+        d, code = get(f"https://apply.workable.com/api/v1/widget/accounts/{cand}", with_code=True)
         if isinstance(d, dict) and d.get("name") and d.get("jobs"):
+            _wk_suffix[s] = cand
             return [(j["url"], j["title"], j.get("location", ""),
                      posted(j.get("published_on") or j.get("created_at"))) for j in d["jobs"]]
+        if code == 429:
+            break          # уже притормозили: остальные суффиксы только углубят бан
+    _wk_suffix.pop(s, None)       # запомненный перестал отвечать — пробуем все заново
     return None
 
 
@@ -345,8 +382,9 @@ def collect(name, url, cache):
     if ats == "embedded":
         return name, ats, slug, embedded(url) or [], None
     if ats:
-        jobs = ADAPTERS[ats](slug)
-        return name, ats, slug, jobs or [], None
+        # None (доска не ответила) не схлопывать в []: иначе 429 от Workable
+        # попадает в отчёт как «доска вернула пустой список» и diagnose молчит
+        return name, ats, slug, ADAPTERS[ats](slug), None
     jobs = embedded(url)          # вакансии внутри страницы — ступень 3
     if jobs:
         return name, "embedded", url, jobs, None
@@ -374,9 +412,12 @@ def run(only=None):
 
     new, changed, stats, closed = [], [], [], []
     for (name, url), (_, ats, slug, jobs, phash) in zip(companies, results):
-        conn.execute("INSERT INTO companies(name,page_url,ats,slug,checked_at) VALUES(?,?,?,?,?) "
+        # added_by/added_at только при вставке: обход не должен переписывать,
+        # кто завёл компанию. DO UPDATE их намеренно не трогает.
+        conn.execute("INSERT INTO companies(name,page_url,ats,slug,checked_at,added_by,added_at) "
+                     "VALUES(?,?,?,?,?,'collector',?) "
                      "ON CONFLICT(name) DO UPDATE SET ats=excluded.ats, slug=excluded.slug, "
-                     "checked_at=excluded.checked_at", (name, url, ats, slug, now))
+                     "checked_at=excluded.checked_at", (name, url, ats, slug, now, now))
         if ats:
             if jobs:
                 conn.execute("UPDATE companies SET last_ok=?, last_count=?, last_error=NULL "
@@ -386,7 +427,7 @@ def run(only=None):
                        else diagnose(ats, slug, url))
                 conn.execute("UPDATE companies SET last_count=?, last_error=? WHERE name=?",
                              (0, why, name))
-        if jobs is None:
+        if ats is None:
             old = conn.execute("SELECT hash FROM pages WHERE url=?", (url,)).fetchone()
             if phash and (not old or old[0] != phash):
                 if old:
@@ -397,7 +438,7 @@ def run(only=None):
             stats.append((name, "страница", 0))
             continue
         fresh = 0
-        for row in jobs:
+        for row in jobs or []:
             j_url, title, loc = row[0], row[1], row[2]
             pub = row[3] if len(row) > 3 else None
             pay = row[4] if len(row) > 4 else None

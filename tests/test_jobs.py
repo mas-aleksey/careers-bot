@@ -43,3 +43,77 @@ def test_every_adapter_is_registered():
     for name in ("ashby", "greenhouse", "lever", "smartrecruiters", "workable",
                  "recruitee", "teamtailor", "pinpoint"):
         assert callable(jobs.ADAPTERS[name])
+
+
+def test_failed_board_is_not_an_empty_board(monkeypatch):
+    """Доска не ответила — пишем настоящую причину и НЕ закрываем вакансии.
+    Раньше None схлопывался в [], и 429 попадал в отчёт как «пустой список»."""
+    import jobs, storage
+    conn = storage.connect()
+    conn.execute("INSERT OR REPLACE INTO companies(name,page_url,ats,slug) "
+                 "VALUES('Zeta','https://zeta.test','workable','zeta')")
+    conn.execute("INSERT OR REPLACE INTO jobs(url,company,title,source,first_seen) "
+                 "VALUES('https://zeta.test/j1','Zeta','Backend','workable','2026-09-01')")
+    conn.commit()
+
+    monkeypatch.setitem(jobs.ADAPTERS, "workable", lambda s: None)
+    monkeypatch.setattr(jobs, "diagnose", lambda *a: "HTTP 429")
+    jobs.run(only="Zeta")
+
+    conn = storage.connect()
+    assert conn.execute("SELECT last_error FROM companies WHERE name='Zeta'").fetchone()[0] == "HTTP 429"
+    assert conn.execute("SELECT closed_at FROM jobs WHERE url='https://zeta.test/j1'").fetchone()[0] is None
+
+
+def test_workable_stops_probing_after_429(monkeypatch):
+    """Бан от Cloudflare — прекращаем перебор суффиксов. Каждый лишний запрос
+    после 429 только продлевает его, а компания всё равно потеряна."""
+    import jobs
+    seen = []
+
+    def fake_get(url, want_json=True, with_code=False):
+        seen.append(url)
+        return (None, 429) if with_code else None
+
+    monkeypatch.setattr(jobs, "get", fake_get)
+    jobs._wk_suffix.clear()
+    assert jobs.workable("zeta") is None
+    assert len(seen) == 1, seen
+
+
+def test_workable_remembers_winning_suffix(monkeypatch):
+    """Суффикс найден один раз — дальше один запрос за цикл, а не три."""
+    import jobs
+    seen = []
+
+    def fake_get(url, want_json=True, with_code=False):
+        seen.append(url)
+        ok = url.endswith("zeta-1")
+        body = {"name": "Zeta", "jobs": [{"url": "u", "title": "t"}]} if ok else {"name": "Zeta"}
+        return (body, 200) if with_code else body
+
+    monkeypatch.setattr(jobs, "get", fake_get)
+    jobs._wk_suffix.clear()
+    assert len(jobs.workable("zeta")) == 1
+    assert len(seen) == 2          # zeta пустой, zeta-1 сработал
+    seen.clear()
+    assert len(jobs.workable("zeta")) == 1
+    assert len(seen) == 1 and seen[0].endswith("zeta-1")
+
+
+def test_collector_does_not_overwrite_who_added(monkeypatch):
+    """Кто завёл компанию — пишется один раз. Обход ходит по ней дважды в сутки
+    и не должен переписывать авторство на себя."""
+    import jobs, storage
+    conn = storage.connect()
+    conn.execute("INSERT OR REPLACE INTO companies"
+                 "(name,page_url,ats,slug,added_by,added_at) "
+                 "VALUES('Omega','https://omega.test','lever','omega','703432434','2026-09-01')")
+    conn.commit()
+
+    monkeypatch.setitem(jobs.ADAPTERS, "lever", lambda s: [("u1", "Backend", "Remote", None)])
+    jobs.run(only="Omega")
+
+    who, when = storage.connect().execute(
+        "SELECT added_by, added_at FROM companies WHERE name='Omega'").fetchone()
+    assert (who, when) == ("703432434", "2026-09-01")

@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS matches(
   PRIMARY KEY(tg_id, job_url));
 CREATE TABLE IF NOT EXISTS companies(
   name TEXT PRIMARY KEY, page_url TEXT, ats TEXT, slug TEXT, checked_at TEXT,
-  last_ok TEXT, last_count INTEGER, last_error TEXT);
+  last_ok TEXT, last_count INTEGER, last_error TEXT,
+  added_by TEXT, added_at TEXT);
 CREATE TABLE IF NOT EXISTS jobs(
   url TEXT PRIMARY KEY, company TEXT, title TEXT, location TEXT,
   source TEXT, first_seen TEXT, posted TEXT, salary TEXT, contact TEXT, closed_at TEXT);
@@ -50,6 +51,8 @@ LATE_COLUMNS = [
     # здоровье источника: молчит доска или отвечает пустым — это разные беды
     ("companies", "last_ok TEXT"), ("companies", "last_count INTEGER"),
     ("companies", "last_error TEXT"),
+    # откуда компания взялась: tg_id человека, "telegram" из добора, "collector"
+    ("companies", "added_by TEXT"), ("companies", "added_at TEXT"),
 ]
 
 

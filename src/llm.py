@@ -4,7 +4,7 @@
 Отдельный модуль, чтобы смена провайдера не растекалась по боту: наружу торчат
 две функции — ask() для свободного текста и ask_json() со схемой в промпте.
 """
-import json, os, time, urllib.error, urllib.request
+import json, os, re, time, urllib.error, urllib.request
 
 URL = "https://openrouter.ai/api/v1/chat/completions"
 KEY = os.environ.get("OPENROUTER_API_KEY", "")
@@ -46,7 +46,12 @@ def ask(messages, model=None, max_tokens=4096, json_mode=False, attempts=3):
             out = json.loads(raw)
             if "error" in out:
                 raise LLMError(str(out["error"])[:200])
-            return out["choices"][0]["message"]["content"]
+            # choices и message бывают null: без явной проверки это TypeError,
+            # а он мимо ретраев — пачка терялась с одного битого ответа
+            msg = ((out.get("choices") or [None])[0] or {}).get("message") or {}
+            if not msg.get("content"):
+                raise ValueError(f"пустой ответ: {str(out)[:200]}")
+            return msg["content"]
         except urllib.error.HTTPError as e:
             last = f"HTTP {e.code}: {e.read()[:200].decode('utf-8', 'ignore')}"
             if e.code not in RETRY_CODES or n == attempts - 1:
@@ -61,16 +66,37 @@ def ask(messages, model=None, max_tokens=4096, json_mode=False, attempts=3):
 
 
 def extract_json(text):
-    """Достаёт объект из ответа. Модель может обернуть его в ```json, а может
-    сначала объяснить словами и только потом выдать JSON — тогда всё до первой
-    скобки надо отбросить, иначе теряется целая пачка вакансий."""
+    """Достаёт объект из ответа. Модель может обернуть его в ```json, может
+    сначала объяснить словами и только потом выдать JSON, а может не уместиться
+    в max_tokens и оборваться на середине массива."""
     t = (text or "").strip()
     if t.startswith("```"):
         t = t.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-    if t.startswith("{"):
+    i = t.find("{")
+    if i < 0:
         return t
-    i, j = t.find("{"), t.rfind("}")
-    return t[i:j + 1] if 0 <= i < j else t
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(t, i)
+        return json.dumps(obj, ensure_ascii=False)
+    except ValueError:
+        return salvage(t, i)
+
+
+def salvage(t, i):
+    """Ответ оборвался на середине: собираем элементы массива, которые модель
+    успела дописать. Иначе пачка из 20 вакансий теряется целиком, и следующий
+    проход оплачивает её заново."""
+    m = re.search(r'"(\w+)"\s*:\s*\[', t[i:])
+    if not m:
+        return t
+    dec, items, p = json.JSONDecoder(), [], i + m.end()
+    while (p := t.find("{", p)) >= 0:
+        try:
+            obj, p = dec.raw_decode(t, p)
+        except ValueError:
+            break
+        items.append(obj)
+    return json.dumps({m.group(1): items}, ensure_ascii=False)
 
 
 def ask_json(system, user, model=None, max_tokens=4096):

@@ -238,25 +238,37 @@ SCORE_SYSTEM = """Ты оцениваешь вакансии под профил
 BATCH = 20
 TRIAGE_BATCH = 50
 
-TRIAGE_SYSTEM = """Отсев по названию должности. Тебе дают профессию кандидата и
-список вакансий с номерами.
+TRIAGE_SYSTEM = """Отсев перед дорогой оценкой. Тебе дают кандидата и список
+вакансий с номерами: должность и локация.
 
-Верни JSON: {"keep": [номера тех, чья должность относится к этой профессии или
-к соседней, откуда переходят]}.
+Верни JSON: {"keep": [номера тех, кого имеет смысл оценивать подробно]}.
 
-Соседние считаются: для аналитика это product manager, product owner, solution
-architect; для бэкенда — platform, infrastructure, SRE. Маркетинг, продажи,
-поддержка, бухгалтерия, рекрутинг — не относятся ни к чему из этого.
-Сомневаешься — оставляй."""
+Выкидывай по двум причинам, обе жёсткие:
+
+1. Другая профессия. Соседние считаются своими: для аналитика это product
+manager, product owner, solution architect; для бэкенда — platform,
+infrastructure, SRE. Маркетинг, продажи, поддержка, бухгалтерия, рекрутинг —
+не относятся ни к чему из этого.
+
+2. Недоступная география. Локация привязана к стране или городу, откуда этого
+кандидата нанять нельзя, и его регион не упомянут. Пометка «Remote» вместе с
+регионом (US, Americas, APAC) означает удалёнку внутри региона, а не по миру.
+Если в локации рядом стоит регион кандидата — это не блокер.
+
+Сомневаешься — оставляй: лишняя оценка стоит центы, потерянная вакансия — нет."""
 
 
 def triage(profile, rows):
     """Кто вообще из этой профессии. Дешёвая модель, только заголовки."""
     import llm
-    listing = "\n".join(f"{i+1}. {t}" for i, (_, _, t, _) in enumerate(rows))
+    listing = "\n".join(f"{i+1}. {t} — {loc or 'локация не указана'}"
+                        for i, (_, _, t, loc) in enumerate(rows))
     out = llm.ask_json(
         TRIAGE_SYSTEM,
-        f"ПРОФЕССИЯ: {profile.get('role', '')}, уровень {profile.get('level', '')}\n\n"
+        f"ПРОФЕССИЯ: {profile.get('role', '')}, уровень {profile.get('level', '')}\n"
+        f"ГДЕ: {profile.get('location', '')}, часовой пояс {profile.get('timezone', '')}\n"
+        f"РЕЛОКАЦИЯ: {profile.get('relocation', '')}\n"
+        f"ГИБРИД: {profile.get('hybrid', '')}\n\n"
         f"ВАКАНСИИ:\n{listing}",
         model=llm.TRIAGE_MODEL, max_tokens=1500)
     keep = {int(n) for n in out.get("keep", []) if str(n).isdigit()}
@@ -274,7 +286,7 @@ def score_batch(profile, rows):
                        "\n\nВАКАНСИИ:\n" + jobs_txt,
                        max_tokens=4000)
     known = {u for u, *_ in rows}
-    return [(x["url"], int(x.get("pct", 0)), str(x.get("why", ""))[:200])
+    return [(x["url"], int(x.get("pct") or 0), str(x.get("why", ""))[:200])
             for x in out.get("scores", []) if x.get("url") in known]
 
 
@@ -302,7 +314,7 @@ def score_pending(conn, tg_id, limit=200):
         for url, *_ in part:
             if url not in {u for u, *_ in keep}:
                 conn.execute("INSERT OR REPLACE INTO matches(tg_id,job_url,pct,why,scored_at) "
-                             "VALUES(?,?,0,'другая профессия',?)", (tg_id, url, now()))
+                             "VALUES(?,?,0,'профессия или география мимо',?)", (tg_id, url, now()))
     conn.commit()
     if len(rows) != len(survivors):
         log("triage", tg_id, f"{len(survivors)} из {len(rows)}")
@@ -320,6 +332,10 @@ def score_pending(conn, tg_id, limit=200):
             if failed >= 3:      # три подряд — что-то с провайдером, ждём прохода
                 break
             continue
+        # Ответ обрезан по max_tokens — salvage спасает начало пачки, остаток
+        # вернётся в следующий проход. Видно здесь, иначе только по счёту.
+        if len(scored) < len(chunk):
+            log("score-short", tg_id, f"{len(scored)} из {len(chunk)}")
         for url, pct, why in scored:
             conn.execute("INSERT OR REPLACE INTO matches(tg_id,job_url,pct,why,scored_at) "
                          "VALUES(?,?,?,?,?)", (tg_id, url, pct, why, now()))
@@ -338,7 +354,7 @@ EDIT_SYSTEM = """Ты правишь профиль кандидата по ег
 оставь как были. Форма профиля та же, что на входе."""
 
 
-def add_company(conn, text):
+def add_company(conn, text, tg_id=None):
     """Бот сам ищет доску: у публичного сервиса нет человека на подхвате."""
     import jobs as J
     raw = text.strip()
@@ -352,9 +368,10 @@ def add_company(conn, text):
     if exists:
         return f"{exists[0]} уже в списке отслеживания."
     found = J.discover(name, url)
-    conn.execute("INSERT OR IGNORE INTO companies(name,page_url,ats,slug,checked_at) "
-                 "VALUES(?,?,?,?,?)",
-                 (name, url, found[0] if found else None, found[1] if found else None, now()))
+    conn.execute("INSERT OR IGNORE INTO companies(name,page_url,ats,slug,checked_at,added_by,added_at) "
+                 "VALUES(?,?,?,?,?,?,?)",
+                 (name, url, found[0] if found else None, found[1] if found else None,
+                  now(), str(tg_id) if tg_id else None, now()))
     conn.commit()
     if not found:
         return (f"Добавил {name}, но читаемой доски не нашёл — буду следить за "
@@ -443,7 +460,9 @@ def deliver(conn):
             try:
                 if datetime.fromisoformat(last) > datetime.now(timezone.utc) - timedelta(hours=20):
                     continue
-            except ValueError:
+            # TypeError — дата без зоны: сравнение падало бы и уносило с собой
+            # рассылку всем остальным, а не только этому пользователю
+            except (ValueError, TypeError):
                 pass
         rows = conn.execute("""
             SELECT m.job_url, m.pct, m.why FROM matches m
@@ -611,7 +630,7 @@ def cmd_add(c):
     if not c.arg:
         c.say("Пришлите ссылку или название после команды, либо нажмите кнопку в /profile.")
         return
-    c.say(add_company(c.conn, c.arg))
+    c.say(add_company(c.conn, c.arg, c.tg_id))
 
 
 def cmd_edit(c):
@@ -709,7 +728,7 @@ def on_awaited(conn, chat, tg_id, kind, text):
     conn.commit()
     if kind == "add":
         send(chat, "Ищу доску вакансий, это займёт до минуты…")
-        send(chat, add_company(conn, text))
+        send(chat, add_company(conn, text, tg_id))
     else:
         send(chat, "Правлю профиль…")
         send(chat, apply_edit(conn, tg_id, text), html=True, markup=keyboard(PROFILE_MENU))
