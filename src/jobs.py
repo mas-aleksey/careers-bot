@@ -202,6 +202,30 @@ def smartrecruiters(s):
     return out
 
 
+def wk_rows(js):
+    """Workable отдаёт строку на каждую пару «вакансия × город»: у CloudLinux
+    14 вакансий разложены в 77 записей с одним url. Схлопываем по shortcode.
+
+    Страны собираем в локацию: ключа `location` в ответе нет, есть `country` и
+    `city`, и без них вакансия выглядит безадресной — гео-отсев такую пропускает
+    и зря платит дорогой моделью."""
+    out = {}
+    for j in js:
+        row = out.setdefault(j.get("shortcode") or j.get("url"), {"job": j, "where": []})
+        place = j.get("country") or j.get("city") or ""
+        if place and place not in row["where"]:
+            row["where"].append(place)
+    res = []
+    for r in out.values():
+        j = r["job"]
+        where = ", ".join(r["where"][:6])
+        remote = str(j.get("telecommuting", "")).lower() == "true"
+        loc = f"Remote: {where}" if remote and where else where or ("Remote" if remote else "")
+        res.append((j["url"], j["title"], loc,
+                    posted(j.get("published_on") or j.get("created_at"))))
+    return res
+
+
 _wk_suffix = {}
 
 
@@ -215,8 +239,7 @@ def workable(s):
         if isinstance(d, dict) and d.get("name"):
             if d.get("jobs"):
                 _wk_suffix[s] = cand
-                return [(j["url"], j["title"], j.get("location", ""),
-                         posted(j.get("published_on") or j.get("created_at"))) for j in d["jobs"]]
+                return wk_rows(d["jobs"])
             empty = True   # аккаунт есть, вакансий нет — это не сбой, а пустая доска
         if code == 429:
             throttled = True

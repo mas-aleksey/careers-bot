@@ -212,3 +212,28 @@ def test_discover_ignores_an_empty_board(monkeypatch):
 
     monkeypatch.setitem(jobs.ADAPTERS, "lever", lambda s: [("u", "Backend", "Remote", None)])
     assert jobs.discover("Zeta", "") == ("lever", "zeta")
+
+
+WORKABLE_PAYLOAD = [
+    {"shortcode": "AAA", "title": "Platform Engineer", "url": "https://w/j/AAA",
+     "telecommuting": "True", "country": "United States", "city": "Austin",
+     "published_on": "2026-09-04"},
+    {"shortcode": "AAA", "title": "Platform Engineer", "url": "https://w/j/AAA",
+     "telecommuting": "True", "country": "Canada", "city": "Ottawa",
+     "published_on": "2026-09-04"},
+    {"shortcode": "BBB", "title": "Kernel Developer", "url": "https://w/j/BBB",
+     "telecommuting": "", "country": "Poland", "city": "Warsaw",
+     "published_on": "2026-09-05"},
+]
+
+
+def test_workable_collapses_city_rows_and_keeps_countries():
+    """Workable отдаёт строку на пару «вакансия × город»: у CloudLinux 14 вакансий
+    лежат в 77 записях с одним url. Схлопываем, страны собираем в локацию —
+    иначе вакансия выглядит безадресной и гео-отсев её пропускает."""
+    import jobs
+    got = jobs.wk_rows(WORKABLE_PAYLOAD)
+    assert len(got) == 2, got
+    by_url = {u: (t, loc) for u, t, loc, _ in got}
+    assert by_url["https://w/j/AAA"] == ("Platform Engineer", "Remote: United States, Canada")
+    assert by_url["https://w/j/BBB"] == ("Kernel Developer", "Poland")
