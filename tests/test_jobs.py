@@ -8,6 +8,8 @@ def test_slug_from_url_beats_guessing():
     assert jobs.from_url("https://jobs.lever.co/appfollow") == ("lever", "appfollow")
     assert jobs.from_url("https://praktika.teamtailor.com/jobs") == ("teamtailor", "praktika")
     assert jobs.from_url("https://vivid.jobs.personio.de/?language=en") == ("personio", "vivid")
+    assert jobs.from_url("https://job-boards.eu.greenhouse.io/growe") == ("greenhouse", "growe")
+    assert jobs.from_url("https://jobs.smartrecruiters.com/CDPROJEKTRED") == ("smartrecruiters", "CDPROJEKTRED")
     assert jobs.from_url("https://elixi.com/careers") is None
 
 

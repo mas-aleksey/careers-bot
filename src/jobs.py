@@ -102,7 +102,8 @@ def registry_db(conn):
 
 ATS_IN_URL = [
     ("ashby", r"jobs\.ashbyhq\.com/([^/?#]+)"),
-    ("greenhouse", r"(?:job-)?boards\.greenhouse\.io/([^/?#]+)"),
+    ("greenhouse", r"(?:job-)?boards(?:\.eu)?\.greenhouse\.io/([^/?#]+)"),
+    ("smartrecruiters", r"jobs\.smartrecruiters\.com/([^/?#]+)"),
     ("lever", r"jobs\.lever\.co/([^/?#]+)"),
     ("teamtailor", r"([a-z0-9-]+)\.teamtailor\.com"),
     ("recruitee", r"([a-z0-9-]+)\.recruitee\.com"),
