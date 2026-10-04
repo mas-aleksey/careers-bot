@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Сборщик вакансий: реестр компаний -> публичные API девяти ATS -> SQLite.
+"""Сборщик вакансий: реестр компаний -> публичные API одиннадцати ATS -> SQLite.
 
 Компании добавляются через бота и живут в таблице companies. У кого нет
 читаемой доски — следим за изменением карьерной страницы по хешу.
 """
 import ast, hashlib, json, os, re, sys, threading, time, urllib.error, urllib.parse, urllib.request
+import html as html_mod
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,6 +15,8 @@ import storage
 
 
 UA = {"User-Agent": "Mozilla/5.0 (careers-bot; +local)"}
+# Отдельные бекенды рвут соединение на честном имени бота.
+BROWSER_UA = "Mozilla/5.0"
 TIMEOUT = 15
 # Минимальный зазор между запросами к одному хосту. Пять потоков попадают на
 # один ATS одновременно, и он отдаёт 429: Workable ловил его регулярно, потому
@@ -72,6 +76,22 @@ def get(url, want_json=True, with_code=False):
     return (body, code) if with_code else body
 
 
+def post_json(url, payload, ua=None):
+    """GraphQL и подобное GET-ом не отдают: нужен POST с телом запроса.
+
+    ua — подменить User-Agent. Бекенд Aristek рвёт соединение на нашем
+    «careers-bot» и отвечает только браузерной строке."""
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=body, method="POST",
+                                 headers={"User-Agent": ua or UA["User-Agent"],
+                                          "Content-Type": "application/json"})
+    try:
+        space_out(url)
+        return json.loads(urllib.request.urlopen(req, timeout=TIMEOUT).read())
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+
+
 # --- реестр -----------------------------------------------------------------
 
 def registry_db(conn):
@@ -87,6 +107,10 @@ ATS_IN_URL = [
     ("teamtailor", r"([a-z0-9-]+)\.teamtailor\.com"),
     ("recruitee", r"([a-z0-9-]+)\.recruitee\.com"),
     ("workable", r"apply\.workable\.com/([^/?#]+)"),
+    ("personio", r"([a-z0-9-]+)\.jobs\.personio\.de"),
+    ("peopleforce", r"(careers\.[a-z0-9.-]+)/v/\d+-"),
+    ("revolutpeople", r"([a-z0-9-]+)\.revolutpeople\.com"),
+    ("revolutpeople", r"revolutpeople\.com/([a-z0-9-]+)/"),
     ("pinpoint", r"([a-z0-9-]+)\.pinpointhq\.com"),
 ]
 
@@ -315,10 +339,167 @@ def pinpoint(s):
                     j.get("title", ""), place, None, pay, str(j.get("reporting_to") or "")[:80]))
     return out
 
+def personio(s):
+    """XML-фид, а не JSON: `<office>` — единственная локация, которую Personio
+    отдаёт, и она же в карточке на сайте. Пустой фид от несуществующего
+    поддомена не отличить по коду — Personio на оба отвечает 200."""
+    body = get(f"https://{s}.jobs.personio.de/xml?language=en", want_json=False)
+    if not body:
+        return None
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError:
+        return None
+    if root.tag != "workzag-jobs":   # 200 с html-страницей — это не пустая доска
+        return None
+    return [(f"https://{s}.jobs.personio.de/job/{j.findtext('id')}?language=en",
+             j.findtext("name") or "", j.findtext("office") or "",
+             posted(j.findtext("createdAt")))
+            for j in root.findall("position") if j.findtext("id")]
+
+def wordpress(s):
+    """WP REST API с типом записи jobs: отдаёт список без ключа и без JS.
+
+    Слаг — host или host/тип: имя типа записи у каждого сайта своё, у BNP это
+    jobs, у Akvelon vacancy. Без типа перебираем WP_TYPES, с типом — один запрос.
+
+    У BNP Paribas это единственный читаемый перечень: портал Avature на
+    bwelcome.hr.bnpparibas отдаёт карточку по jobId, но страницы со списком
+    у него наружу нет. Локации в API нет ни в одном поле — остаётся пустой,
+    страну видно по домену сайта."""
+    host, _, kind = s.partition("/")
+    for kind in ([kind] if kind else WP_TYPES):
+        out = _wp_type(host, kind)
+        if out:
+            return out
+    return None
+
+
+WP_TYPES = ("jobs", "vacancy", "vacancies", "job_listing", "careers")
+
+
+def _wp_type(host, kind):
+    out = []
+    for page in range(1, 6):      # 100 на страницу, дальше пятой не ходим
+        d = get(f"https://{host}/wp-json/wp/v2/{kind}?per_page=100&page={page}")
+        if not isinstance(d, list) or not d:
+            break
+        for j in d:
+            if j.get("lang") not in (None, "en"):   # Polylang дублирует вакансии
+                continue
+            out.append((j.get("link", ""),
+                        html_mod.unescape((j.get("title") or {}).get("rendered", "")),
+                        "", posted(j.get("date"))))
+    return out
+
+def revolutpeople(s):
+    """Revolut People. Ссылку API не отдаёт, она собирается из слага заголовка
+    и id: revolutpeople.com/<tenant>/public/careers/position/<slug>-<id>.
+
+    Локация — поле `name` каждой записи, а не `country`: у Elixi во всех
+    вакансиях country=United Kingdom, хотя нанимают в Европе и ОАЭ. По country
+    гео-отсев зарубил бы всё как британский онсайт."""
+    d = get(f"https://{s}.revolutpeople.com/api/external/v2/postings")
+    if not isinstance(d, list):
+        return None
+    out = []
+    for j in d:
+        title = j.get("title") or ""
+        slug = re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", title.lower())).strip("-")
+        where = ", ".join(f"{l.get('name')} ({l.get('type')})"
+                          for l in j.get("locations", []) if l.get("name"))
+        out.append((f"https://revolutpeople.com/{s}/public/careers/position/{slug}-{j['id']}",
+                    title, where, None))
+    return out or None
+
+def aristek(s):
+    """WPGraphQL. Боевой сайт на Gatsby, список тянет с бекенда stage —
+    так зашито в их же бандле, другого публичного адреса нет.
+
+    В архиве 108 вакансий с 2022 года, все со статусом publish; открытые
+    помечены флагом vacancyStatus, их четыре. Без этого фильтра в базу
+    поехали бы сто мёртвых карточек."""
+    out, after = [], "null"
+    for _ in range(5):                    # 100 за запрос, пятой страницы хватит
+        d = post_json(f"https://{s}/graphql", ua=BROWSER_UA, payload={"query": (
+            "{vacancies(first:100,after:%s){pageInfo{hasNextPage endCursor}"
+            "nodes{title slug date vacancyPageCustomFields"
+            "{vacancyStatus location}}}}" % after)})
+        v = ((d or {}).get("data") or {}).get("vacancies")
+        if not v:
+            return None
+        for j in v["nodes"]:
+            f = j.get("vacancyPageCustomFields") or {}
+            if not f.get("vacancyStatus"):
+                continue
+            # Ссылка из API ведёт на stage, кандидату нужен боевой адрес.
+            out.append((f"https://aristeksystems.com/career/{j['slug']}/",
+                        j.get("title") or "", ", ".join(f.get("location") or []),
+                        posted(j.get("date"))))
+        if not v["pageInfo"]["hasNextPage"]:
+            break
+        after = json.dumps(v["pageInfo"]["endCursor"])
+    return out or None
+
+def atlassian(s):
+    """Свой эндпоинт поверх iCIMS, ключа не требует — вопреки тому, что
+    отвечает соседний /endpoint/careers/listing без «s» на конце.
+
+    Локации приходят в три колена с индексом и повтором страны
+    («Bengaluru - India -   Bengaluru,  560071 India»); берём первые два
+    и убираем дубль, иначе строка не лезет в карточку и мешает гео-отсеву."""
+    d = get(f"https://{s}/endpoint/careers/listings")
+    if not isinstance(d, list):
+        return None
+    out = []
+    for j in d:
+        post = j.get("portalJobPost") or {}
+        places = []
+        for loc in j.get("locations") or []:
+            parts = [x.strip() for x in loc.split(" - ")[:2] if x.strip()]
+            short = " - ".join(dict.fromkeys(parts))
+            if short and short not in places:
+                places.append(short)
+        out.append((post.get("portalUrl") or j.get("applyUrl") or "",
+                    j.get("title") or "", ", ".join(places[:4]),
+                    str(post.get("updatedDate") or "")[:10] or None))
+    return out or None
+
+PF_JOB = re.compile(r'<a class="stretched-link[^"]*"[^>]*href="(?P<href>/v/[^"]+)"[^>]*>'
+                    r'(?P<title>[^<]{3,100})</a>')
+
+
+def peopleforce(s):
+    """PeopleForce под своим доменом: careers.taxdome.com. Вакансии в вёрстке,
+    по десять на страницу, локации на списке нет — только отдел."""
+    out, seen = [], set()
+    for page in range(1, 6):
+        html = get(f"https://{s}/?page={page}", want_json=False)
+        if not html:
+            break
+        fresh = 0
+        for m in PF_JOB.finditer(html):
+            href = m.group("href")
+            if href in seen:
+                continue
+            seen.add(href)
+            fresh += 1
+            out.append((f"https://{s}{href}", html_mod.unescape(m.group("title")).strip(),
+                        "", None))
+        if not fresh:
+            break
+    return out or None
+
 
 ADAPTERS = {"ashby": ashby, "greenhouse": greenhouse, "lever": lever,
             "smartrecruiters": smartrecruiters, "workable": workable,
-            "recruitee": recruitee, "teamtailor": teamtailor, "pinpoint": pinpoint}
+            "recruitee": recruitee, "teamtailor": teamtailor, "pinpoint": pinpoint,
+            "personio": personio,
+            "wordpress": wordpress,
+            "revolutpeople": revolutpeople,
+            "aristek": aristek,
+            "atlassian": atlassian,
+            "peopleforce": peopleforce}
 
 
 def discover(name, url):
@@ -328,7 +509,7 @@ def discover(name, url):
         return hit
     for s in slug_variants(name):
         for ats in ("ashby", "greenhouse", "lever", "smartrecruiters", "workable",
-                    "recruitee", "teamtailor", "pinpoint"):
+                    "recruitee", "teamtailor", "pinpoint", "personio"):
             # Пустая доска — не доказательство, что это та самая компания:
             # Workable заводит аккаунты под кучу имён, и Atlassian с Revolut
             # получили чужие. Для discovery годится только доска с вакансиями.
@@ -381,10 +562,97 @@ def next_data(html):
 
 # Вакансия как обычная ссылка на свой же сайт: /careers/7928089, /jobs/1234.
 # Внутри ссылки название и локация отдельными кусками текста.
+# Ссылка-кандидат: в пути есть «карьерный» сегмент. Что в хвосте — решает
+# job_id_like: одной регуляркой это не выражается без ложных срабатываний.
+# Окно тела 1200, а не 600: у Findev карточка с грейдом и списком стран
+# длиннее, и на 600 из восьми вакансий читались три.
 LINKED_JOB = re.compile(
-    r'<a[^>]+href="(?P<href>[^"]*/(?:careers|jobs|vacancies|positions)/\d{4,}[^"]*)"[^>]*>'
-    r'(?P<body>.{0,600}?)</a>', re.S)
+    r'<a[^>]+href="(?P<href>[^"]*/(?:careers?|jobs?|vacanc\w*|open-positions|positions?)/'
+    r'[^"]*)"[^>]*>(?P<body>.{0,1200}?)</a>', re.S)
 SEPARATORS = {"—", "-", "–", "·", "|", ",", ""}
+
+
+# Ступень 3г: на своей странице только заголовок и кнопка «Apply now» на
+# внешний ATS. Так устроен Surfe: текст ссылки бесполезен, название вакансии
+# стоит в ближайшем заголовке перед ней. Хосты перечислены явно — ловить любой
+# /apply/ значит собирать кнопки «откликнуться» со всего сайта.
+APPLY_HOSTS = r"app\.dover\.com"
+APPLY_LINK = re.compile(
+    r"<h[1-4][^>]*>(?P<title>[^<]{3,80})</h[1-4]>"
+    r"(?:(?!<h[1-4])[\s\S]){0,800}?"
+    r'href="(?P<href>https://(?:' + APPLY_HOSTS + r')/apply/[^"]+)"')
+
+
+def apply_links(html):
+    out, seen = [], set()
+    for m in APPLY_LINK.finditer(html):
+        href = m.group("href")
+        if href in seen:
+            continue
+        seen.add(href)
+        out.append((href, html_mod.unescape(m.group("title")).strip(), "", None))
+    return out
+
+
+# Ступень 3д: Next.js App Router держит данные не в __NEXT_DATA__, а в потоке
+# self.__next_f — JSON там экранирован дважды. У Kake вакансии лежат в блоке
+# jobsList; вместо разбора всего потока выбираем тройки полей напрямую.
+# Локация у них не указана вовсе, ближайшее к ней — timezone (GMT-6).
+FLIGHT_JOB = re.compile(
+    r'\\"id\\":\\"(?P<id>[0-9a-f-]{36})\\",'
+    r'\\"title\\":\\"(?P<title>[^\\]{3,100})\\",'
+    r'\\"timezone\\":\\"(?P<tz>[^\\]{0,20})\\"')
+
+
+def flight_jobs(html, url):
+    """Ссылка собирается как <корень>/<id>: у Kake карточка живёт на /jobs/<id>."""
+    root = re.match(r"https?://[^/]+(?:/[^/?#]+)*", url)
+    if not root:
+        return []
+    base = root.group(0).rstrip("/")
+    out, seen = [], set()
+    for m in FLIGHT_JOB.finditer(html):
+        if m.group("id") in seen:
+            continue
+        seen.add(m.group("id"))
+        out.append((f"{base}/{m.group('id')}", html_mod.unescape(m.group("title")),
+                    m.group("tz"), None))
+    return out
+
+
+NOTION_JOB = re.compile(
+    r'https://[a-z.]*notion\.(?:com|so)/(?:p/)?[A-Za-z0-9-]+/'
+    r'(?P<slug>[A-Za-z0-9-]+?)-(?P<id>[0-9a-f]{32})')
+
+
+def notion_jobs(html):
+    """Ступень 3в: вакансия — страница в Notion. Так устроен Podscribe: на
+    карьерной странице только ссылки в app.notion.com, своих карточек нет.
+    Заголовок берём из слага, он же заголовок страницы."""
+    out, seen = [], set()
+    for m in NOTION_JOB.finditer(html):
+        if m.group("id") in seen:
+            continue
+        seen.add(m.group("id"))
+        out.append((m.group(0), m.group("slug").replace("-", " "), "", None))
+    return out
+
+
+def job_id_like(href):
+    """Последний сегмент пути похож на id вакансии, а не на раздел сайта.
+
+    Форматов три: голые цифры (/jobs/123456), слаг с числовым хвостом у Findev
+    (senior-java-developer-storm-4256535) и буквенно-цифровой код у careers-page
+    и RED Global (3W39VW58, 8qTvhsLE). Общее у них — цифра в сегменте, которой
+    нет у разделов вроде /careers/about или /career/open-positions/filter."""
+    path = href.split("?")[0].split("#")[0].rstrip("/")
+    if "/apply/" in path:        # у RED Global та же вакансия ещё и как «Apply now»
+        return False
+    seg = path.rsplit("/", 1)[-1]
+    if not re.fullmatch(r"[A-Za-z0-9_-]{4,60}", seg) or not re.search(r"\d", seg):
+        return False
+    # Слаг без числового хвоста — это раздел: /jobs/web3-developer-2024-guide.
+    return "-" not in seg or bool(re.search(r"-\d{4,}$", seg))
 
 
 def linked_jobs(html, url):
@@ -401,6 +669,8 @@ def linked_jobs(html, url):
         if not parts:
             continue
         href = m.group("href")
+        if not job_id_like(href):
+            continue
         full = href if href.startswith("http") else root.group(0) + href
         if full in seen:                 # одна вакансия часто и в списке, и в JSON страницы
             continue
@@ -418,7 +688,8 @@ def embedded(url):
     base = url.rstrip("/")
     out = [(f"{base}/{jid}", title.strip(), company.strip(), None)
            for jid, title, company in JOB_IN_PAYLOAD.findall(html)]
-    return out or next_data(html) or linked_jobs(html, url)
+    return (out or next_data(html) or linked_jobs(html, url)
+            or notion_jobs(html) or apply_links(html) or flight_jobs(html, url))
 
 
 def diagnose(ats, slug, url):
@@ -473,6 +744,10 @@ def collect(name, url, cache):
     jobs = embedded(url)          # вакансии внутри страницы — ступень 3
     if jobs:
         return name, "embedded", url, jobs, None
+    host = urllib.parse.urlparse(url).netloc
+    jobs = wordpress(host) if host else None   # ступень 3б: WP REST API сайта
+    if jobs:
+        return name, "wordpress", host, jobs, None
     return name, None, None, None, page_hash(url)
 
 

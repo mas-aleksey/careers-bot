@@ -23,9 +23,10 @@ Self-hosted, long-polling (no public URL or webhook needed), SQLite for state.
 
 ## Where the jobs come from
 
-Nine ATS providers through their public APIs, no keys required: **Greenhouse,
+Eleven ATS providers through their public APIs, no keys required: **Greenhouse,
 Ashby, Lever** (including the EU host), **SmartRecruiters, Workable, Recruitee,
-Teamtailor, Pinpoint**, plus openings embedded straight into a Next.js page.
+Teamtailor, Pinpoint, Personio** (XML feed), **Revolut People**, plus the
+WordPress REST API and openings embedded straight into a Next.js page.
 
 Given a company name or a link, the bot tries each provider until a board
 answers. Roughly half of the companies you throw at it turn out to have one.

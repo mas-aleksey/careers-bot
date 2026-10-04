@@ -7,6 +7,7 @@ def test_slug_from_url_beats_guessing():
     assert jobs.from_url("https://job-boards.greenhouse.io/nebius") == ("greenhouse", "nebius")
     assert jobs.from_url("https://jobs.lever.co/appfollow") == ("lever", "appfollow")
     assert jobs.from_url("https://praktika.teamtailor.com/jobs") == ("teamtailor", "praktika")
+    assert jobs.from_url("https://vivid.jobs.personio.de/?language=en") == ("personio", "vivid")
     assert jobs.from_url("https://elixi.com/careers") is None
 
 
@@ -252,3 +253,221 @@ def test_teamtailor_takes_location_from_jobposting():
     assert jobs.tt_place({"_jobposting": "{'jobLocation': [{'address': {'addressCountry': 'PL'}}]}"}) == "PL"
     assert jobs.tt_place({}) == ""
     assert jobs.tt_place({"_jobposting": "не json"}) == ""
+
+
+PERSONIO_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<workzag-jobs>
+<position><id>42</id><office>Porto</office><name>Backend Engineer</name>
+<createdAt>2026-09-15T10:00:00+00:00</createdAt></position>
+<position><office>Berlin</office><name>Без id — пропускаем</name></position>
+</workzag-jobs>"""
+
+
+def test_personio_parses_xml_and_skips_idless(monkeypatch):
+    """Personio отдаёт XML, а не JSON, и на чужой поддомен — тоже 200."""
+    monkeypatch.setattr(jobs, "get", lambda url, **kw: PERSONIO_XML)
+    assert jobs.personio("vivid") == [
+        ("https://vivid.jobs.personio.de/job/42?language=en", "Backend Engineer",
+         "Porto", "2026-09-15")]
+    monkeypatch.setattr(jobs, "get", lambda url, **kw: "<html>не фид</html>")
+    assert jobs.personio("vivid") is None
+
+
+WP_PAGE = [
+    {"link": "https://x.test/en/jobs/a/", "title": {"rendered": "Backend &#8211; Senior"},
+     "lang": "en", "date": "2026-09-15T10:00:00"},
+    {"link": "https://x.test/pt/jobs/a/", "title": {"rendered": "Backend"},
+     "lang": "pt", "date": "2026-09-15T10:00:00"},
+]
+
+
+def test_wordpress_keeps_english_and_stops_on_empty_page(monkeypatch):
+    """Polylang отдаёт ту же вакансию на двух языках — в выдаче нужна одна."""
+    pages = iter([WP_PAGE, []])
+    monkeypatch.setattr(jobs, "get", lambda url, **kw: next(pages, []))
+    assert jobs.wordpress("x.test/jobs") == [
+        ("https://x.test/en/jobs/a/", "Backend – Senior", "", "2026-09-15")]
+    monkeypatch.setattr(jobs, "get", lambda url, **kw: {"code": "rest_no_route"})
+    assert jobs.wordpress("x.test/jobs") is None
+
+
+def test_wordpress_finds_the_post_type_when_slug_has_none(monkeypatch):
+    """Тип записи у каждого сайта свой: у BNP jobs, у Akvelon vacancy."""
+    seen = []
+
+    def fake_get(url, **kw):
+        seen.append(url)
+        if "/vacancy?" in url and url.endswith("&page=1"):
+            return WP_PAGE
+        return [] if "/vacancy?" in url else {"code": "rest_no_route"}
+
+    monkeypatch.setattr(jobs, "get", fake_get)
+    rows = jobs.wordpress("x.test")
+    assert len(rows) == 1 and "/en/jobs/a/" in rows[0][0]
+    assert any("/wp/v2/jobs?" in u for u in seen)      # сперва пробуем jobs
+    assert any("/wp/v2/vacancy?" in u for u in seen)
+
+
+FINDEV_HTML = """
+<a href="/career/open-positions/senior-java-developer-storm-4256535">
+  <div><h3>Java developer (STORM)</h3><span>Senior</span>
+  <p>%s</p><span>Spain</span></div></a>
+<a href="/jobs/998877">Backend</a>
+<a href="/career/open-positions/filter">Все вакансии</a>
+""" % ("x" * 700)
+
+
+def test_linked_jobs_reads_id_after_slug_and_long_card():
+    """Findev: id в хвосте слага, а карточка длиннее прежнего окна в 600."""
+    rows = jobs.linked_jobs(FINDEV_HTML, "https://fin.dev/career")
+    hrefs = [r[0] for r in rows]
+    assert "https://fin.dev/career/open-positions/senior-java-developer-storm-4256535" in hrefs
+    assert "https://fin.dev/jobs/998877" in hrefs        # старый формат не сломан
+    assert all("filter" not in h for h in hrefs)         # ссылка-фильтр не вакансия
+    storm = next(r for r in rows if "storm" in r[0])
+    assert storm[1] == "Java developer (STORM)" and storm[2] == "Spain"
+
+
+RP_POSTINGS = [{
+    "id": "f8523682-4cbf-4c3c-a7c3-70333c4836c9",
+    "title": "Senior Backend Engineer (Python)",
+    "locations": [{"name": "Europe", "type": "remote", "country": {"name": "United Kingdom"}},
+                  {"name": "Dubai", "type": "office", "country": {"name": "United Kingdom"}}],
+}]
+
+
+def test_revolutpeople_builds_url_and_ignores_country(monkeypatch):
+    """country у Elixi везде United Kingdom, хотя нанимают в Европе и ОАЭ."""
+    monkeypatch.setattr(jobs, "get", lambda url, **kw: RP_POSTINGS)
+    (url, title, where, _), = jobs.revolutpeople("elixi")
+    assert url == ("https://revolutpeople.com/elixi/public/careers/position/"
+                   "senior-backend-engineer-python-f8523682-4cbf-4c3c-a7c3-70333c4836c9")
+    assert title == "Senior Backend Engineer (Python)"
+    assert where == "Europe (remote), Dubai (office)"
+    assert "United Kingdom" not in where
+
+
+def test_job_id_like_tells_id_from_section():
+    """Три формата id против разделов сайта и дублей «Apply now»."""
+    assert jobs.job_id_like("/jobs/123456")                       # xata
+    assert jobs.job_id_like("/career/open-positions/java-dev-4256535")
+    assert jobs.job_id_like("/emcd/job/3W39VW58")                 # careers-page
+    assert jobs.job_id_like("/jobs/job/sap-basis-consultant/r5yeHsqh")
+    assert not jobs.job_id_like("/jobs/job/apply/r5yeHsqh")       # дубль заявки
+    assert not jobs.job_id_like("/career/open-positions/filter")
+    assert not jobs.job_id_like("/jobs/web3-developer-2024-guide")
+
+
+NOTION_HTML = """
+<a href="https://app.notion.com/p/podscribe/Senior-Backend-Engineer-2b2454e64c6a8052b2b6d2ecfa74f9d2?source=copy_link">роль</a>
+<a href="https://app.notion.com/p/podscribe/Senior-Backend-Engineer-2b2454e64c6a8052b2b6d2ecfa74f9d2">та же, второй раз</a>
+<a href="https://www.notion.so/podscribe/Our-Handbook">не вакансия</a>
+"""
+
+
+def test_notion_jobs_dedups_and_needs_page_id():
+    """Podscribe держит вакансии страницами Notion, ссылка повторяется дважды."""
+    rows = jobs.notion_jobs(NOTION_HTML)
+    assert len(rows) == 1
+    url, title, where, when = rows[0]
+    assert title == "Senior Backend Engineer"
+    assert url.endswith("2b2454e64c6a8052b2b6d2ecfa74f9d2")   # без ?source=
+    assert (where, when) == ("", None)
+
+
+SURFE_HTML = """
+<h3>Senior Backend Engineer</h3>
+<a href="https://app.dover.com/apply/surfe/b812b5b6-42b6-417a-923c-7737ba82a06f">Apply now</a>
+<h3>Our values</h3>
+<a href="https://www.surfe.com/apply/newsletter">Apply now</a>
+"""
+
+
+def test_apply_links_take_title_from_heading():
+    """У Surfe текст ссылки — «Apply now», название стоит в заголовке перед ней."""
+    rows = jobs.apply_links(SURFE_HTML)
+    assert len(rows) == 1                       # чужой /apply/ не считается
+    url, title, where, when = rows[0]
+    assert title == "Senior Backend Engineer"
+    assert url.startswith("https://app.dover.com/apply/surfe/")
+
+
+
+
+FLIGHT_HTML = (
+    'self.__next_f.push([1,"{\\"type\\":\\"jobsList\\",\\"data\\":{\\"jobs\\":['
+    '{\\"id\\":\\"799d1cae-de94-4580-b877-f50b73d8c436\\",'
+    '\\"title\\":\\"Senior Backend (GO) Engineer\\",\\"timezone\\":\\"GMT-6\\"},'
+    '{\\"id\\":\\"799d1cae-de94-4580-b877-f50b73d8c436\\",'
+    '\\"title\\":\\"Senior Backend (GO) Engineer\\",\\"timezone\\":\\"GMT-6\\"}]}}"])'
+)
+
+
+def test_flight_jobs_reads_next_router_stream():
+    """App Router держит данные в self.__next_f, а не в __NEXT_DATA__."""
+    rows = jobs.flight_jobs(FLIGHT_HTML, "https://kake.co/jobs")
+    assert len(rows) == 1                     # id повторяется в потоке
+    url, title, tz, when = rows[0]
+    assert url == "https://kake.co/jobs/799d1cae-de94-4580-b877-f50b73d8c436"
+    assert (title, tz, when) == ("Senior Backend (GO) Engineer", "GMT-6", None)
+
+
+AR_PAGE = {"data": {"vacancies": {
+    "pageInfo": {"hasNextPage": False, "endCursor": "x"},
+    "nodes": [
+        {"title": "Senior Go Developer", "slug": "senior-go-developer",
+         "date": "2026-05-07T10:00:00",
+         "vacancyPageCustomFields": {"vacancyStatus": True, "location": ["Remote"]}},
+        {"title": "Закрытая с 2022", "slug": "old-one", "date": "2022-02-14T10:00:00",
+         "vacancyPageCustomFields": {"vacancyStatus": False, "location": ["Remote"]}},
+    ]}}}
+
+
+def test_aristek_keeps_only_flagged_open_and_fixes_host(monkeypatch):
+    """В архиве 108 вакансий с 2022 года, открыты четыре — остальные publish."""
+    monkeypatch.setattr(jobs, "post_json", lambda url, payload, ua=None: AR_PAGE)
+    (url, title, where, when), = jobs.aristek("stage.aristeksystems.com")
+    assert url == "https://aristeksystems.com/career/senior-go-developer/"
+    assert "stage." not in url                 # ссылка из API ведёт на stage
+    assert (title, where, when) == ("Senior Go Developer", "Remote", "2026-05-07")
+
+
+ATL_LISTING = [{
+    "portalJobPost": {"portalUrl": "https://globalcareers-atlassian.icims.com/jobs/1/x/job",
+                      "updatedDate": "2026-09-24 03:33 PM"},
+    "title": "Senior Backend Engineer",
+    "applyUrl": "https://globalcareers-atlassian.icims.com/jobs/1/x/job?mode=apply",
+    "locations": ["Bengaluru - India -   Bengaluru,  560071 India",
+                  "Remote - Remote", "Remote - UK - Remote"],
+}]
+
+
+def test_atlassian_shortens_locations_and_skips_apply_url(monkeypatch):
+    """Локации приходят в три колена с индексом; ссылка нужна без mode=apply."""
+    monkeypatch.setattr(jobs, "get", lambda url, **kw: ATL_LISTING)
+    (url, title, where, when), = jobs.atlassian("www.atlassian.com")
+    assert url.endswith("/job") and "mode=apply" not in url
+    assert where == "Bengaluru - India, Remote, Remote - UK"
+    assert (title, when) == ("Senior Backend Engineer", "2026-09-24")
+
+
+PF_PAGE1 = ('<a class="stretched-link tw-text-black" data-turbo-frame="_top"'
+            ' href="/v/238101-senior-devops-engineer">Senior Devops &amp; Engineer</a>'
+            '<a class="other" href="/v/1-not-a-card">Чужая ссылка</a>')
+
+
+def test_peopleforce_pages_until_nothing_new(monkeypatch):
+    """Страницы по десять; вторая повторяет первую — значит список кончился."""
+    seen = []
+
+    def fake_get(url, **kw):
+        seen.append(url)
+        return PF_PAGE1
+
+    monkeypatch.setattr(jobs, "get", fake_get)
+    rows = jobs.peopleforce("careers.taxdome.com")
+    assert len(rows) == 1                       # вторая страница не добавила нового
+    assert len(seen) == 2                       # и дальше не ходим
+    url, title, where, when = rows[0]
+    assert url == "https://careers.taxdome.com/v/238101-senior-devops-engineer"
+    assert title == "Senior Devops & Engineer"
