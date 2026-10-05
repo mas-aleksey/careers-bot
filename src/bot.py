@@ -220,7 +220,7 @@ SCORE_SYSTEM = """Ты оцениваешь вакансии под профил
 шкалу всем одинаково.
 
 Блокеры дают ровно 0, а не пониженный балл:
-- уровень ниже, чем у кандидата;
+- junior-позиция, стажировка или trainee;
 - страна найма, откуда кандидата нанять нельзя;
 - onsite или обязательная релокация, если кандидат их не рассматривает;
 - гибрид, если кандидат его не рассматривает;
@@ -228,6 +228,11 @@ SCORE_SYSTEM = """Ты оцениваешь вакансии под профил
 
 Пометка «Remote» вместе с регионом (Americas, APAC, US) означает удалёнку внутри
 этого региона, а не по миру.
+
+Грейд блокером не является, кроме junior и стажировок. Middle и middle+ senior-
+кандидату подойти могут: разрыв снижает балл, но не обнуляет. И наоборот —
+вакансия уровнем выше кандидата тоже не блокер, смотри на требования, а не на
+слово в названии.
 
 Верни JSON: {"scores": [{"url": "...", "pct": 0-100, "why": "одно предложение"}]}
 Оценивай каждую присланную вакансию, порядок сохраняй. why — по-русски, коротко,
@@ -254,6 +259,10 @@ infrastructure, SRE. Маркетинг, продажи, поддержка, б�
 кандидата нанять нельзя, и его регион не упомянут. Пометка «Remote» вместе с
 регионом (US, Americas, APAC) означает удалёнку внутри региона, а не по миру.
 Если в локации рядом стоит регион кандидата — это не блокер.
+
+Голый «Remote», «Anywhere», «Fully remote» без страны и региона — НЕ блокер,
+оставляй. Пустая локация — тоже не блокер. Отсутствие страны значит, что её
+не указали, а не что кандидат не подходит.
 
 Сомневаешься — оставляй: лишняя оценка стоит центы, потерянная вакансия — нет."""
 
@@ -300,6 +309,75 @@ def spread(conn, tg_id, url, pct, why):
         (tg_id, pct, why, now(), url))
 
 
+# --- ворота до моделей -------------------------------------------------------
+# География и грейд решаются поиском по строке, без единого вызова LLM. Триаж
+# те же данные читает хуже: из 1768 вакансий с заведомо чужой страной он ловил
+# 219, а 1549 доходили до дорогой модели и получали там ноль за ту же географию.
+
+# Справочник мест. Неполный намеренно: незнакомая страна означает «ворота
+# промолчали», а не «вакансию выбросили».
+PLACES = re.compile(
+    r"united states|\busa\b|u\.s\.|canada|mexico|brazil|argentina|chile|colombia|peru"
+    r"|latam|americas|india|bengaluru|bangalore|hyderabad|pune|gurgaon|japan|tokyo"
+    r"|singapore|china|hong kong|korea|apac|australia|sydney|melbourne|brisbane"
+    r"|auckland|new zealand|philippines|vietnam|indonesia|malaysia|thailand|nigeria"
+    r"|lagos|kenya|egypt|south africa|dubai|\buae\b|united arab|saudi|qatar|kuwait"
+    r"|israel|turkey|pakistan|san francisco|seattle|austin|new york|boston|chicago"
+    r"|denver|atlanta|miami|toronto|vancouver|montreal|gmt-"
+    # Короткие коды в реальных строках: «Remote (US only)», «Remote - US».
+    r"|remote[\s(,/-]*us\b|\bus only\b|\bus-remote\b", re.I)
+
+# Наднациональное: годится почти любому европейцу, уточнять по стране не нужно.
+SUPRA = r"europe|emea|\beu\b|anywhere|worldwide|global"
+# Европа целиком считается допустимой: компании тут часто нанимают через границы,
+# и ошибиться в сторону лишней оценки дешевле, чем потерять вакансию.
+EUROPE = (r"portugal|porto|lisbo|spain|poland|germany|netherlands|france|italy|czech"
+          r"|serbia|cyprus|united kingdom|\buk\b|ireland|sweden|denmark|norway|finland"
+          r"|switzerland|austria|belgium|greece|romania|bulgaria|estonia|latvia"
+          r"|lithuania|hungary|croatia|slovak|slovenia")
+# Пустая строка и голый Remote без страны — не блокер: у BNP Paribas локации нет
+# вовсе, страна стоит только в тексте вакансии.
+BARE = re.compile(r"^\s*(remote|anywhere|fully remote)?\s*$", re.I)
+LOW_GRADE = re.compile(r"\b(junior|jr\.?|intern|internship|trainee|graduate"
+                       r"|entry.level|apprentice|working student|werkstudent"
+                       r"|стажёр|стажер|младший)\b", re.I)
+SENIOR_LEVELS = {"senior", "lead", "staff", "principal"}
+
+
+def allowed_places(profile):
+    """Регулярка допустимых мест или None, если ворота по географии не нужны.
+
+    Готов переезжать — география перестаёт быть блокером вообще."""
+    rel = str(profile.get("relocation", "")).lower()
+    # Подстрокой «да» ловится «не покиДАет» — сверяем по слову и смотрим на
+    # отрицание первым. Пустое поле считаем «не переезжает»: локация в профиле
+    # есть всегда, а relocation заполняет модель и иногда коротко.
+    movable = not re.search(r"\b(нет|no)\b", rel) and re.search(r"\b(да|yes)\b|готов", rel)
+    if movable:
+        return None
+    where = " ".join(str(profile.get(k, "")) for k in ("location", "timezone", "hybrid"))
+    own = [w for w in (EUROPE.split("|")) if re.search(w, where, re.I)]
+    return re.compile("|".join(own + [SUPRA, EUROPE]), re.I)
+
+
+def gate_reason(profile, title, location):
+    """Почему вакансию можно отбросить без моделей. None — пропускаем дальше.
+
+    Причина возвращается с найденным словом: молчаливый отказ не отследить при
+    ручном разборе, а им мы ловим ошибки фильтров."""
+    if str(profile.get("level", "")).lower() in SENIOR_LEVELS:
+        m = LOW_GRADE.search(title or "")
+        if m:
+            return f"грейд: в названии «{m.group(0)}», профиль от senior"
+    ok = allowed_places(profile)
+    loc = location or ""
+    if ok and not BARE.match(loc):
+        m = PLACES.search(loc)
+        if m and not ok.search(loc):
+            return f"локация «{m.group(0)}», подходящих мест в строке нет"
+    return None
+
+
 def score_pending(conn, tg_id, limit=200):
     """Оценивает то, что для этого профиля ещё не оценено. Закрытые пропускаем:
     платить за оценку снятой вакансии незачем."""
@@ -314,6 +392,20 @@ def score_pending(conn, tg_id, limit=200):
         WHERE m.job_url IS NULL AND j.closed_at IS NULL
         GROUP BY j.dedup
         ORDER BY j.posted DESC NULLS LAST LIMIT ?""", (tg_id, limit)).fetchall()
+    # Ворота: география и грейд — до моделей, бесплатно.
+    passed, blocked = [], 0
+    for r in rows:
+        why = gate_reason(profile, r[2], r[3])
+        if why:
+            spread(conn, tg_id, r[0], 0, why)
+            blocked += 1
+        else:
+            passed.append(r)
+    if blocked:
+        conn.commit()
+        log("gate", tg_id, f"{blocked} из {len(rows)}")
+    rows = passed
+
     # Первый проход дешёвой моделью: отсеянным сразу ноль, без оплаты основной.
     survivors = []
     for i in range(0, len(rows), TRIAGE_BATCH):

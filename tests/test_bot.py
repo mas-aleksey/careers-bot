@@ -92,3 +92,66 @@ def test_spread_scores_whole_duplicate_group():
 
     got = conn.execute("SELECT job_url, pct FROM matches WHERE tg_id=777 ORDER BY job_url").fetchall()
     assert got == [("https://t/0", 84), ("https://t/1", 84), ("https://t/2", 84)], got
+
+
+SENIOR = {"level": "senior", "location": "Порту, Португалия", "timezone": "Europe/Lisbon",
+          "relocation": "нет, Португалию не покидает", "hybrid": "да, 2 дня в неделю в Порту"}
+
+
+def gated(title, loc, profile=None):
+    return bot.gate_reason(profile or SENIOR, title, loc) is not None
+
+
+def test_gate_keeps_unknown_geography():
+    """Пустая локация и голый Remote — не блокер: у BNP страна только в тексте."""
+    assert not gated("Senior Backend Engineer", "")
+    assert not gated("Senior Backend Engineer", None)
+    assert not gated("Senior Backend Engineer", "Remote")
+    assert not gated("Senior Backend Engineer", "Anywhere")
+
+
+def test_gate_cuts_foreign_only_locations():
+    assert gated("Senior Backend Engineer", "Remote US")
+    assert gated("Senior Backend Engineer", "New York, NY. Remote (US only)")
+    assert gated("Senior Backend Engineer", "Bengaluru - India, Remote")
+    assert gated("Senior Backend Engineer", "GMT-6")
+
+
+def test_gate_keeps_multicountry_with_one_match():
+    """Строка с десятком стран проходит, если среди них есть подходящая."""
+    assert not gated("Senior Backend Engineer", "Remote - EMEA; United States")
+    assert not gated("Senior Backend Engineer", "Remote: Portugal, Poland, Spain")
+    assert not gated("Senior Backend Engineer", "Amsterdam, Netherlands; Remote")
+    assert not gated("Senior Backend Engineer", "Porto")
+
+
+def test_gate_grade_only_cuts_the_bottom():
+    """Middle senior-кандидату подойти может, стажировка — нет."""
+    assert gated("Junior Backend Engineer", "Porto")
+    assert gated("Backend Engineer Intern", "Porto")
+    assert not gated("Middle Backend Engineer", "Porto")
+    assert not gated("Middle/Senior Java Developer", "Porto")
+
+
+def test_gate_grade_off_for_non_senior_profile():
+    """У junior и middle опасное направление обратное — ворота молчат."""
+    assert not gated("Junior Backend Engineer", "Porto", dict(SENIOR, level="middle"))
+    assert not gated("Junior Backend Engineer", "Porto", dict(SENIOR, level=""))
+
+
+def test_gate_off_when_relocation_allowed():
+    movable = dict(SENIOR, relocation="да, готов к переезду")
+    assert not gated("Senior Backend Engineer", "Remote US", movable)
+
+
+def test_gate_reason_names_the_match():
+    """Молчаливый отказ не отследить при ручном разборе."""
+    assert "Remote US" in bot.gate_reason(SENIOR, "Senior Backend Engineer", "Remote US")
+    assert "Junior" in bot.gate_reason(SENIOR, "Junior Backend Engineer", "Porto")
+
+
+def test_score_prompt_allows_middle():
+    """Senior-кандидату middle подойти может: блокер только junior и стажировки."""
+    assert "junior-позиция, стажировка или trainee" in bot.SCORE_SYSTEM
+    assert "уровень ниже, чем у кандидата" not in bot.SCORE_SYSTEM
+    assert "Middle и middle+" in bot.SCORE_SYSTEM

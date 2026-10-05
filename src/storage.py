@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS companies(
   added_by TEXT, added_at TEXT);
 CREATE TABLE IF NOT EXISTS jobs(
   url TEXT PRIMARY KEY, company TEXT, title TEXT, location TEXT,
-  source TEXT, first_seen TEXT, posted TEXT, salary TEXT, contact TEXT, closed_at TEXT);
+  source TEXT, first_seen TEXT, posted TEXT, salary TEXT, contact TEXT, closed_at TEXT,
+  description TEXT);
 CREATE TABLE IF NOT EXISTS pages(
   url TEXT PRIMARY KEY, hash TEXT, checked_at TEXT);
 """
@@ -48,6 +49,7 @@ LATE_COLUMNS = [
     ("users", "last_notified TEXT"),
     ("jobs", "posted TEXT"), ("jobs", "salary TEXT"),
     ("jobs", "contact TEXT"), ("jobs", "closed_at TEXT"),
+    ("jobs", "description TEXT"),
     # здоровье источника: молчит доска или отвечает пустым — это разные беды
     ("companies", "last_ok TEXT"), ("companies", "last_count INTEGER"),
     ("companies", "last_error TEXT"),

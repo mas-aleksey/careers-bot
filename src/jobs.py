@@ -358,6 +358,17 @@ def personio(s):
              posted(j.findtext("createdAt")))
             for j in root.findall("position") if j.findtext("id")]
 
+def plain_text(html, limit=12000):
+    """HTML описания вакансии в текст: модели нужен смысл, а не разметка.
+    Обрезаем на 12 тысячах символов — у BNP медиана 5.5 тысяч, длинный хвост
+    обычно состоит из юридических оговорок, а не из требований."""
+    if not html:
+        return None
+    txt = re.sub(r"<script.*?</script>|<style.*?</style>", " ", html, flags=re.S)
+    txt = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", txt)).strip()
+    return html_mod.unescape(txt)[:limit] or None
+
+
 def wordpress(s):
     """WP REST API с типом записи jobs: отдаёт список без ключа и без JS.
 
@@ -390,7 +401,8 @@ def _wp_type(host, kind):
                 continue
             out.append((j.get("link", ""),
                         html_mod.unescape((j.get("title") or {}).get("rendered", "")),
-                        "", posted(j.get("date"))))
+                        "", posted(j.get("date")), None, "",
+                        plain_text((j.get("content") or {}).get("rendered", ""))))
     return out
 
 def revolutpeople(s):
@@ -473,20 +485,27 @@ PF_JOB = re.compile(r'<a class="stretched-link[^"]*"[^>]*href="(?P<href>/v/[^"]+
 def peopleforce(s):
     """PeopleForce под своим доменом: careers.taxdome.com. Вакансии в вёрстке,
     по десять на страницу, локации на списке нет — только отдел."""
+    host = s.split("/")[0]
     out, seen = [], set()
-    for page in range(1, 6):
-        html = get(f"https://{s}/?page={page}", want_json=False)
+    for page in range(1, 9):                   # у Hivex 60 вакансий по десять
+        url = f"https://{s}?page={page}" if "/" in s else f"https://{s}/?page={page}"
+        html = get(url, want_json=False)
         if not html:
             break
+        # Своя вёрстка на поддомене (TaxDome) и общая на careers-page.com
+        # (Hivex) отличаются классами ссылки — вторую забирает linked_jobs.
+        found = [(m.group("href"), html_mod.unescape(m.group("title")).strip())
+                 for m in PF_JOB.finditer(html)]
+        if not found:
+            found = [(r[0], r[1]) for r in linked_jobs(html, f"https://{host}")]
         fresh = 0
-        for m in PF_JOB.finditer(html):
-            href = m.group("href")
-            if href in seen:
+        for href, title in found:
+            full = href if href.startswith("http") else f"https://{host}{href}"
+            if full in seen:
                 continue
-            seen.add(href)
+            seen.add(full)
             fresh += 1
-            out.append((f"https://{s}{href}", html_mod.unescape(m.group("title")).strip(),
-                        "", None))
+            out.append((full, title, "", None))
         if not fresh:
             break
     return out or None
@@ -817,16 +836,22 @@ def run(only=None):
             pub = row[3] if len(row) > 3 else None
             pay = row[4] if len(row) > 4 else None
             who = row[5] if len(row) > 5 else None
+            # Текст вакансии: многие ATS отдают его в том же ответе, что и список.
+            # Оценка по одним заголовку и локации слепа к стеку и требованиям.
+            desc = row[6] if len(row) > 6 else None
             if not j_url:
                 continue
-            cur = conn.execute("INSERT OR IGNORE INTO jobs(url,company,title,location,source,first_seen,posted,salary,contact,dedup) "
-                               "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            cur = conn.execute("INSERT OR IGNORE INTO jobs(url,company,title,location,source,first_seen,posted,salary,contact,dedup,description) "
+                               "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                                (j_url, name, title, loc, ats, now, pub, pay, who,
-                                storage.dedup_key(name, title)))
+                                storage.dedup_key(name, title), desc))
             if not cur.rowcount and who:
                 conn.execute("UPDATE jobs SET contact=? WHERE url=? AND contact IS NULL", (who, j_url))
             if not cur.rowcount and pay:
                 conn.execute("UPDATE jobs SET salary=? WHERE url=? AND salary IS NULL", (pay, j_url))
+            if not cur.rowcount and desc:
+                conn.execute("UPDATE jobs SET description=? WHERE url=? AND description IS NULL",
+                             (desc, j_url))
             if not cur.rowcount and pub:      # вакансия известна, дату узнали позже
                 conn.execute("UPDATE jobs SET posted=? WHERE url=? AND posted IS NULL", (pub, j_url))
             if cur.rowcount:

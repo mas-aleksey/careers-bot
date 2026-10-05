@@ -287,7 +287,7 @@ def test_wordpress_keeps_english_and_stops_on_empty_page(monkeypatch):
     """Polylang отдаёт ту же вакансию на двух языках — в выдаче нужна одна."""
     pages = iter([WP_PAGE, []])
     monkeypatch.setattr(jobs, "get", lambda url, **kw: next(pages, []))
-    assert jobs.wordpress("x.test/jobs") == [
+    assert [r[:4] for r in jobs.wordpress("x.test/jobs")] == [
         ("https://x.test/en/jobs/a/", "Backend – Senior", "", "2026-09-15")]
     monkeypatch.setattr(jobs, "get", lambda url, **kw: {"code": "rest_no_route"})
     assert jobs.wordpress("x.test/jobs") is None
@@ -473,3 +473,48 @@ def test_peopleforce_pages_until_nothing_new(monkeypatch):
     url, title, where, when = rows[0]
     assert url == "https://careers.taxdome.com/v/238101-senior-devops-engineer"
     assert title == "Senior Devops & Engineer"
+
+
+HIVEX_PAGE = '<a class="d-block" href="/hivexteam/job/L54V9X93">Shopify Developer</a>'
+
+
+def test_peopleforce_reads_shared_domain_layout(monkeypatch):
+    """На careers-page.com вёрстка другая: класс d-block вместо stretched-link."""
+    pages = iter([HIVEX_PAGE, HIVEX_PAGE])
+    seen = []
+
+    def fake_get(url, **kw):
+        seen.append(url)
+        return next(pages, "")
+
+    monkeypatch.setattr(jobs, "get", fake_get)
+    rows = jobs.peopleforce("www.careers-page.com/hivexteam")
+    assert len(rows) == 1                       # вторая страница повторила первую
+    assert rows[0][0] == "https://www.careers-page.com/hivexteam/job/L54V9X93"
+    assert rows[0][1] == "Shopify Developer"
+    assert seen[0] == "https://www.careers-page.com/hivexteam?page=1"
+
+
+def test_triage_prompt_allows_bare_remote():
+    """Голый Remote без страны триаж принимал за региональную удалёнку и резал:
+    так потерялись Staff Product Engineer у Mozilla и 71 вакансия BNP."""
+    import bot
+    assert "Голый «Remote»" in bot.TRIAGE_SYSTEM
+    assert "Пустая локация" in bot.TRIAGE_SYSTEM
+
+
+def test_wordpress_keeps_description(monkeypatch):
+    """Текст вакансии приходит в том же ответе — без него оценка слепа к стеку."""
+    page = [{"link": "https://x.test/en/jobs/a/", "lang": "en",
+             "title": {"rendered": "Backend"}, "date": "2026-09-15T10:00:00",
+             "content": {"rendered": "<p>Python &amp; Kafka</p><script>x</script>"}}]
+    pages = iter([page, []])
+    monkeypatch.setattr(jobs, "get", lambda url, **kw: next(pages, []))
+    (row,) = jobs.wordpress("x.test/jobs")
+    assert len(row) == 7
+    assert row[6] == "Python & Kafka"       # без тегов, скриптов и сущностей
+
+
+def test_plain_text_trims_long_tail():
+    assert jobs.plain_text("<p>" + "a" * 20000 + "</p>", limit=100) == "a" * 100
+    assert jobs.plain_text("") is None
