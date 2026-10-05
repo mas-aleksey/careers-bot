@@ -191,16 +191,20 @@ def ashby(s):
     d = get(f"https://api.ashbyhq.com/posting-api/job-board/{s}")
     if not d:
         return None
-    return [(j["jobUrl"], j["title"], j.get("location", ""), posted(j.get("publishedAt")))
+    return [(j["jobUrl"], j["title"], j.get("location", ""), posted(j.get("publishedAt")),
+             None, "", plain_text(j.get("descriptionPlain") or j.get("descriptionHtml")))
             for j in d.get("jobs", [])]
 
 
 def greenhouse(s):
-    d = get(f"https://boards-api.greenhouse.io/v1/boards/{s}/jobs")
+    # content=true отдаёт текст вакансии в том же ответе — без него оценка слепа
+    # к стеку и требованиям, а лишнего запроса флаг не стоит.
+    d = get(f"https://boards-api.greenhouse.io/v1/boards/{s}/jobs?content=true")
     if not isinstance(d, dict) or "jobs" not in d:
         return None
     return [(j["absolute_url"], j["title"], (j.get("location") or {}).get("name", ""),
-             posted(j.get("first_published") or j.get("updated_at"))) for j in d["jobs"]]
+             posted(j.get("first_published") or j.get("updated_at")),
+             None, "", plain_text(j.get("content"))) for j in d["jobs"]]
 
 
 def lever(s):
@@ -210,8 +214,35 @@ def lever(s):
         d = get(f"https://{host}/v0/postings/{s}?mode=json")
         if isinstance(d, list) and d:
             return [(j["hostedUrl"], j["text"], j.get("categories", {}).get("location", ""),
-                     posted(j.get("createdAt"))) for j in d]
+                     posted(j.get("createdAt")), None, "",
+                     plain_text(j.get("descriptionPlain") or j.get("description")))
+                    for j in d]
     return None
+
+
+# Текста в списке SmartRecruiters нет, он лежит в карточке — отдельный запрос
+# на вакансию. companyDescription пропускаем: одна и та же реклама компании во
+# всех вакансиях, в оценку не входит, а лимит в 12 тысяч символов съедает.
+SR_SECTIONS = ("jobDescription", "qualifications", "additionalInformation")
+
+
+def sr_place(loc):
+    """fullLocation — единственное поле со страной словом: country отдаёт код
+    («London gb»), и гео-ворота, устроенные на названиях, его не видят. У Gcore
+    страны ещё и разъезжаются по city/region/address, в fullLocation они собраны.
+    Пустые куски там встречаются («Serbia, , Cyprus») — выкидываем."""
+    full = loc.get("fullLocation") or ""
+    parts = [p.strip() for p in full.split(",") if p.strip()]
+    if parts:
+        return ", ".join(dict.fromkeys(parts))[:120]
+    return f"{loc.get('city','')} {loc.get('country','')}".strip()
+
+
+def sr_text(s, jid):
+    d = get(f"https://api.smartrecruiters.com/v1/companies/{s}/postings/{jid}")
+    sections = ((d or {}).get("jobAd") or {}).get("sections") or {}
+    return plain_text(" ".join(filter(None, (
+        (sections.get(k) or {}).get("text") for k in SR_SECTIONS))))
 
 
 def smartrecruiters(s):
@@ -220,10 +251,9 @@ def smartrecruiters(s):
         return None
     out = []
     for j in d.get("content", []):
-        loc = j.get("location", {})
         out.append((f"https://jobs.smartrecruiters.com/{s}/{j['id']}", j["name"],
-                    f"{loc.get('city','')} {loc.get('country','')}".strip(),
-                    posted(j.get("releasedDate"))))
+                    sr_place(j.get("location") or {}),
+                    posted(j.get("releasedDate")), None, "", sr_text(s, j["id"])))
     return out
 
 
@@ -247,7 +277,8 @@ def wk_rows(js):
         remote = str(j.get("telecommuting", "")).lower() == "true"
         loc = f"Remote: {where}" if remote and where else where or ("Remote" if remote else "")
         res.append((j["url"], j["title"], loc,
-                    posted(j.get("published_on") or j.get("created_at"))))
+                    posted(j.get("published_on") or j.get("created_at")), None, "",
+                    plain_text(j.get("description"))))
     return res
 
 
@@ -260,7 +291,10 @@ def workable(s):
     # всплеск, на котором Cloudflare отвечает 1015 и компания пропадает.
     empty, throttled = False, False
     for cand in ([_wk_suffix[s]] if s in _wk_suffix else (s, f"{s}-1", f"{s}-2")):
-        d, code = get(f"https://apply.workable.com/api/v1/widget/accounts/{cand}", with_code=True)
+        # details=true отдаёт текст вакансий в том же ответе: отдельный запрос
+        # на вакансию здесь стоит дорого — зазор к Workable три секунды.
+        d, code = get(f"https://apply.workable.com/api/v1/widget/accounts/{cand}?details=true",
+                      with_code=True)
         if isinstance(d, dict) and d.get("name"):
             if d.get("jobs"):
                 _wk_suffix[s] = cand
@@ -278,8 +312,11 @@ def recruitee(s):
     d = get(f"https://{s}.recruitee.com/api/offers/")
     if not isinstance(d, dict) or "offers" not in d:
         return None
+    # Описание и требования лежат разными полями — модели нужны оба.
     return [(j["careers_url"], j["title"], f"{j.get('city','')} {j.get('country','')}".strip(),
-             posted(j.get("published_at") or j.get("created_at"))) for j in d["offers"]]
+             posted(j.get("published_at") or j.get("created_at")), None, "",
+             plain_text(" ".join(filter(None, (j.get("description"), j.get("requirements"))))))
+            for j in d["offers"]]
 
 
 def tt_place(item):
@@ -313,7 +350,9 @@ def teamtailor(s):
         return None
     items = d.get("items") or d.get("jobs") or []
     return [(j.get("url", ""), j.get("title", ""), tt_place(j),
-             posted(j.get("date_published"))) for j in items] or None
+             posted(j.get("date_published")), None, "",
+             plain_text(j.get("content_html") or j.get("content_text")))
+            for j in items] or None
 
 
 def pinpoint(s):
@@ -337,7 +376,8 @@ def pinpoint(s):
         # reporting_to у Tabby заполнен в 52 вакансиях из 61 и часто содержит
         # почту нанимающего менеджера — отклик мимо общей формы.
         out.append((j.get("url") or f"https://{s}.pinpointhq.com/postings/{j['id']}",
-                    j.get("title", ""), place, None, pay, str(j.get("reporting_to") or "")[:80]))
+                    j.get("title", ""), place, None, pay,
+                    str(j.get("reporting_to") or "")[:80], plain_text(j.get("description"))))
     return out
 
 def personio(s):
@@ -355,7 +395,8 @@ def personio(s):
         return None
     return [(f"https://{s}.jobs.personio.de/job/{j.findtext('id')}?language=en",
              j.findtext("name") or "", j.findtext("office") or "",
-             posted(j.findtext("createdAt")))
+             posted(j.findtext("createdAt")), None, "",
+             plain_text(" ".join(v.text or "" for v in j.iter("value"))))
             for j in root.findall("position") if j.findtext("id")]
 
 def plain_text(html, limit=12000):
@@ -421,8 +462,12 @@ def revolutpeople(s):
         slug = re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", title.lower())).strip("-")
         where = ", ".join(f"{l.get('name')} ({l.get('type')})"
                           for l in j.get("locations", []) if l.get("name"))
+        # Карточка вакансии по API открывается, хотя та же страница на сайте
+        # закрыта Cloudflare: текст и дату берём оттуда.
+        card = get(f"https://{s}.revolutpeople.com/api/external/v2/postings/{j['id']}") or {}
         out.append((f"https://revolutpeople.com/{s}/public/careers/position/{slug}-{j['id']}",
-                    title, where, None))
+                    title, where, posted(card.get("creation_date_time")), None, "",
+                    plain_text(card.get("description"))))
     return out or None
 
 def aristek(s):
@@ -437,7 +482,7 @@ def aristek(s):
         d = post_json(f"https://{s}/graphql", ua=BROWSER_UA, payload={"query": (
             "{vacancies(first:100,after:%s){pageInfo{hasNextPage endCursor}"
             "nodes{title slug date vacancyPageCustomFields"
-            "{vacancyStatus location}}}}" % after)})
+            "{vacancyStatus location content{title text}}}}}" % after)})
         v = ((d or {}).get("data") or {}).get("vacancies")
         if not v:
             return None
@@ -446,13 +491,60 @@ def aristek(s):
             if not f.get("vacancyStatus"):
                 continue
             # Ссылка из API ведёт на stage, кандидату нужен боевой адрес.
+            # Поле content у самой записи пустое: текст разложен по секциям
+            # ACF, заголовок секции склеиваем с телом.
+            body = " ".join(" ".join(filter(None, (c.get("title"), c.get("text"))))
+                            for c in f.get("content") or [])
             out.append((f"https://aristeksystems.com/career/{j['slug']}/",
                         j.get("title") or "", ", ".join(f.get("location") or []),
-                        posted(j.get("date"))))
+                        posted(j.get("date")), None, "", plain_text(body)))
         if not v["pageInfo"]["hasNextPage"]:
             break
         after = json.dumps(v["pageInfo"]["endCursor"])
     return out or None
+
+EPAM_API = "https://careers.epam.com/api/jobs/v2/search/careers-i18n"
+EPAM_SIZE = 50                        # size=100 сервер молча урезает до пятидесяти
+
+
+def epam_page(s, **extra):
+    q = {"lang": "en", "sortBy": "relevance;relocation=asc", "websiteLocale": "en-us",
+         "size": EPAM_SIZE, **extra}
+    d = get(f"{EPAM_API}?{urllib.parse.urlencode(q)}")
+    return (d or {}).get("data")
+
+
+def epam(s):
+    """careers.epam.com: страница отдаёт первые десять вакансий из пяти тысяч,
+    остальное тянет её же API. Слаг — название страны: отбирать всю EPAM смысла
+    нет. Страна задаётся не именем, а id из фасетов, его берём из первого ответа.
+
+    Раньше компания шла через `embedded`, и в базу уезжали favicon и логотипы
+    со страницы — своей доски у EPAM нет, а скрейпер брал все ссылки подряд."""
+    first = epam_page(s, **{"from": 0})
+    if not first:
+        return None
+    cid = next((c["id"] for c in first["facets"]["country"]
+                if str(c.get("key", "")).lower() == s.lower()), None)
+    if not cid:
+        return []                     # страна есть в реестре, вакансий в ней нет
+    out = []
+    for page in range(20):            # 50 за запрос; тысячи вакансий в одной стране нет
+        d = epam_page(s, **{"from": page * EPAM_SIZE, "facets": f"country={cid}"})
+        rows = (d or {}).get("jobs")
+        if not rows:
+            break
+        for j in rows:
+            where = ", ".join(c["name"] for c in j.get("country") or [] if c.get("name"))
+            if str(j.get("vacancy_type") or "").lower() == "remote" and where:
+                where = f"Remote: {where}"
+            out.append((f"https://careers.epam.com{(j.get('seo') or {}).get('url', '')}",
+                        j.get("name") or "", where, posted(j.get("created_at")),
+                        None, "", plain_text(j.get("text") or j.get("description"))))
+        if len(out) >= (d.get("total") or 0):
+            break
+    return out or None
+
 
 def atlassian(s):
     """Свой эндпоинт поверх iCIMS, ключа не требует — вопреки тому, что
@@ -475,7 +567,9 @@ def atlassian(s):
                 places.append(short)
         out.append((post.get("portalUrl") or j.get("applyUrl") or "",
                     j.get("title") or "", ", ".join(places[:4]),
-                    str(post.get("updatedDate") or "")[:10] or None))
+                    str(post.get("updatedDate") or "")[:10] or None, None, "",
+                    plain_text(" ".join(filter(None, (j.get("overview"),
+                        j.get("responsibilities"), j.get("qualifications")))))))
     return out or None
 
 PF_JOB = re.compile(r'<a class="stretched-link[^"]*"[^>]*href="(?P<href>/v/[^"]+)"[^>]*>'
@@ -505,7 +599,11 @@ def peopleforce(s):
                 continue
             seen.add(full)
             fresh += 1
-            out.append((full, title, "", None))
+            # Текста в списке нет, страница вакансии — обычный HTML без JS.
+            # Шапка и подвал попадают в текст вместе с вакансией: отделять их
+            # пришлось бы под каждую из двух вёрсток, а модели они не мешают.
+            out.append((full, title, "", None, None, "",
+                        plain_text(get(full, want_json=False))))
         if not fresh:
             break
     return out or None
@@ -519,6 +617,7 @@ ADAPTERS = {"ashby": ashby, "greenhouse": greenhouse, "lever": lever,
             "revolutpeople": revolutpeople,
             "aristek": aristek,
             "atlassian": atlassian,
+            "epam": epam,
             "peopleforce": peopleforce}
 
 
@@ -568,8 +667,13 @@ def next_data(html):
             title = node.get("title") or node.get("position") or node.get("name")
             link = node.get("link") or node.get("url") or node.get("applyUrl")
             if isinstance(title, str) and isinstance(link, str) and link.startswith("http"):
+                # Текст лежит рядом с заголовком: у BETBY сама карточка ведёт на
+                # Sage HR за Cloudflare, и описание оттуда уже не достать.
                 found.append((link, title.strip(), str(node.get("location") or
-                                                       node.get("city") or "")[:60], None))
+                                                       node.get("city") or "")[:60],
+                              None, None, None,
+                              plain_text(next((t for t in (node.get("content"), node.get("description"))
+                                               if isinstance(t, str)), None))))
             for v in node.values():
                 walk(v)
         elif isinstance(node, list):
@@ -624,19 +728,50 @@ FLIGHT_JOB = re.compile(
     r'\\"timezone\\":\\"(?P<tz>[^\\]{0,20})\\"')
 
 
+# Текст вакансии в потоке лежит отдельной строкой «<ref>:T<длина>,<html>», а в
+# карточке стоит только ссылка на неё: "requirementsHtml":"$19". Длина задана в
+# байтах — у Kake в тексте неразрывные пробелы, и по символам конец уезжает.
+FLIGHT_BLOCK = re.compile(rb"([0-9a-f]+):T([0-9a-f]+),")
+# [^{] держит поиск внутри одной карточки: с точкой он перескакивал на соседнюю
+# и привязывал к вакансии чужой текст.
+FLIGHT_REF = re.compile(r'"id":"([0-9a-f-]{36})"[^{]{0,600}?"requirementsHtml":"\$([0-9a-f]+)"')
+
+
+def json_loads(text):
+    try:
+        return json.loads(text)
+    except ValueError:
+        return None
+
+
+def flight_texts(html):
+    """id вакансии -> её текст. Пусто, если поток устроен иначе."""
+    stream = "".join(
+        chunk for m in re.finditer(r"self\.__next_f\.push\(\[1,(\".*?\")\]\)", html, re.S)
+        for chunk in [json_loads(m.group(1))] if isinstance(chunk, str))
+    if not stream:
+        return {}
+    raw = stream.encode()
+    blocks = {m.group(1).decode(): raw[m.end():m.end() + int(m.group(2), 16)].decode("utf8", "replace")
+              for m in FLIGHT_BLOCK.finditer(raw)}
+    return {jid: plain_text(blocks[ref])
+            for jid, ref in FLIGHT_REF.findall(stream) if ref in blocks}
+
+
 def flight_jobs(html, url):
     """Ссылка собирается как <корень>/<id>: у Kake карточка живёт на /jobs/<id>."""
     root = re.match(r"https?://[^/]+(?:/[^/?#]+)*", url)
     if not root:
         return []
     base = root.group(0).rstrip("/")
+    texts = flight_texts(html)
     out, seen = [], set()
     for m in FLIGHT_JOB.finditer(html):
         if m.group("id") in seen:
             continue
         seen.add(m.group("id"))
         out.append((f"{base}/{m.group('id')}", html_mod.unescape(m.group("title")),
-                    m.group("tz"), None))
+                    m.group("tz"), None, None, "", texts.get(m.group("id"))))
     return out
 
 

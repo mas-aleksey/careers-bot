@@ -91,7 +91,7 @@ def test_workable_remembers_winning_suffix(monkeypatch):
 
     def fake_get(url, want_json=True, with_code=False):
         seen.append(url)
-        ok = url.endswith("zeta-1")
+        ok = "zeta-1?" in url
         body = {"name": "Zeta", "jobs": [{"url": "u", "title": "t"}]} if ok else {"name": "Zeta"}
         return (body, 200) if with_code else body
 
@@ -101,7 +101,7 @@ def test_workable_remembers_winning_suffix(monkeypatch):
     assert len(seen) == 2          # zeta пустой, zeta-1 сработал
     seen.clear()
     assert len(jobs.workable("zeta")) == 1
-    assert len(seen) == 1 and seen[0].endswith("zeta-1")
+    assert len(seen) == 1 and "zeta-1?" in seen[0]
 
 
 def test_collector_does_not_overwrite_who_added(monkeypatch):
@@ -128,7 +128,7 @@ def test_workable_empty_account_is_not_a_failure(monkeypatch):
     import jobs
 
     def fake_get(url, want_json=True, with_code=False):
-        body = {"name": "Vivid Money", "jobs": []} if url.endswith("vivid") else None
+        body = {"name": "Vivid Money", "jobs": []} if "vivid?" in url else None
         code = 200 if body else 404
         return (body, code) if with_code else body
 
@@ -220,7 +220,7 @@ def test_discover_ignores_an_empty_board(monkeypatch):
 WORKABLE_PAYLOAD = [
     {"shortcode": "AAA", "title": "Platform Engineer", "url": "https://w/j/AAA",
      "telecommuting": "True", "country": "United States", "city": "Austin",
-     "published_on": "2026-09-04"},
+     "published_on": "2026-09-04", "description": "<p>Run the platform</p>"},
     {"shortcode": "AAA", "title": "Platform Engineer", "url": "https://w/j/AAA",
      "telecommuting": "True", "country": "Canada", "city": "Ottawa",
      "published_on": "2026-09-04"},
@@ -237,9 +237,11 @@ def test_workable_collapses_city_rows_and_keeps_countries():
     import jobs
     got = jobs.wk_rows(WORKABLE_PAYLOAD)
     assert len(got) == 2, got
-    by_url = {u: (t, loc) for u, t, loc, _ in got}
+    by_url = {r[0]: (r[1], r[2]) for r in got}
     assert by_url["https://w/j/AAA"] == ("Platform Engineer", "Remote: United States, Canada")
     assert by_url["https://w/j/BBB"] == ("Kernel Developer", "Poland")
+    # details=true кладёт текст в тот же ответ — отдельных запросов не делаем
+    assert [r[6] for r in got if r[0].endswith("AAA")] == ["Run the platform"]
 
 
 def test_teamtailor_takes_location_from_jobposting():
@@ -268,7 +270,7 @@ PERSONIO_XML = """<?xml version="1.0" encoding="UTF-8"?>
 def test_personio_parses_xml_and_skips_idless(monkeypatch):
     """Personio отдаёт XML, а не JSON, и на чужой поддомен — тоже 200."""
     monkeypatch.setattr(jobs, "get", lambda url, **kw: PERSONIO_XML)
-    assert jobs.personio("vivid") == [
+    assert [r[:4] for r in jobs.personio("vivid")] == [
         ("https://vivid.jobs.personio.de/job/42?language=en", "Backend Engineer",
          "Porto", "2026-09-15")]
     monkeypatch.setattr(jobs, "get", lambda url, **kw: "<html>не фид</html>")
@@ -340,13 +342,20 @@ RP_POSTINGS = [{
 
 def test_revolutpeople_builds_url_and_ignores_country(monkeypatch):
     """country у Elixi везде United Kingdom, хотя нанимают в Европе и ОАЭ."""
-    monkeypatch.setattr(jobs, "get", lambda url, **kw: RP_POSTINGS)
-    (url, title, where, _), = jobs.revolutpeople("elixi")
+    card = {"description": "<p>Строим бота</p>",
+            "creation_date_time": "2026-07-28T08:52:22.562206Z"}
+    monkeypatch.setattr(jobs, "get",
+                        lambda url, **kw: card if url.rstrip("/").endswith(RP_POSTINGS[0]["id"])
+                        else RP_POSTINGS)
+    row, = jobs.revolutpeople("elixi")
+    url, title, where, when = row[:4]
     assert url == ("https://revolutpeople.com/elixi/public/careers/position/"
                    "senior-backend-engineer-python-f8523682-4cbf-4c3c-a7c3-70333c4836c9")
     assert title == "Senior Backend Engineer (Python)"
     assert where == "Europe (remote), Dubai (office)"
     assert "United Kingdom" not in where
+    # страница вакансии закрыта Cloudflare, карточка по API открывается
+    assert (row[6], when) == ("Строим бота", "2026-07-28")
 
 
 def test_job_id_like_tells_id_from_section():
@@ -399,9 +408,13 @@ def test_apply_links_take_title_from_heading():
 FLIGHT_HTML = (
     'self.__next_f.push([1,"{\\"type\\":\\"jobsList\\",\\"data\\":{\\"jobs\\":['
     '{\\"id\\":\\"799d1cae-de94-4580-b877-f50b73d8c436\\",'
-    '\\"title\\":\\"Senior Backend (GO) Engineer\\",\\"timezone\\":\\"GMT-6\\"},'
+    '\\"title\\":\\"Senior Backend (GO) Engineer\\",\\"timezone\\":\\"GMT-6\\",'
+    '\\"requirementsHtml\\":\\"$19\\"},'
     '{\\"id\\":\\"799d1cae-de94-4580-b877-f50b73d8c436\\",'
-    '\\"title\\":\\"Senior Backend (GO) Engineer\\",\\"timezone\\":\\"GMT-6\\"}]}}"])'
+    '\\"title\\":\\"Senior Backend (GO) Engineer\\",\\"timezone\\":\\"GMT-6\\",'
+    '\\"requirementsHtml\\":\\"$19\\"}]}}"])'
+    # текст — отдельная строка потока, длина 0x17 в байтах, а не в символах
+    'self.__next_f.push([1,"19:T17,<p>Go и Kubernetes</p>"])'
 )
 
 
@@ -409,9 +422,10 @@ def test_flight_jobs_reads_next_router_stream():
     """App Router держит данные в self.__next_f, а не в __NEXT_DATA__."""
     rows = jobs.flight_jobs(FLIGHT_HTML, "https://kake.co/jobs")
     assert len(rows) == 1                     # id повторяется в потоке
-    url, title, tz, when = rows[0]
+    url, title, tz, when = rows[0][:4]
     assert url == "https://kake.co/jobs/799d1cae-de94-4580-b877-f50b73d8c436"
     assert (title, tz, when) == ("Senior Backend (GO) Engineer", "GMT-6", None)
+    assert rows[0][6] == "Go и Kubernetes"   # длина строки задана в байтах
 
 
 AR_PAGE = {"data": {"vacancies": {
@@ -419,7 +433,10 @@ AR_PAGE = {"data": {"vacancies": {
     "nodes": [
         {"title": "Senior Go Developer", "slug": "senior-go-developer",
          "date": "2026-05-07T10:00:00",
-         "vacancyPageCustomFields": {"vacancyStatus": True, "location": ["Remote"]}},
+         "vacancyPageCustomFields": {"vacancyStatus": True, "location": ["Remote"],
+                                     "content": [{"title": None, "text": "<p>Про компанию</p>"},
+                                                 {"title": "Required Skills:",
+                                                  "text": "<p>5+ years of Go</p>"}]}},
         {"title": "Закрытая с 2022", "slug": "old-one", "date": "2022-02-14T10:00:00",
          "vacancyPageCustomFields": {"vacancyStatus": False, "location": ["Remote"]}},
     ]}}}
@@ -428,10 +445,13 @@ AR_PAGE = {"data": {"vacancies": {
 def test_aristek_keeps_only_flagged_open_and_fixes_host(monkeypatch):
     """В архиве 108 вакансий с 2022 года, открыты четыре — остальные publish."""
     monkeypatch.setattr(jobs, "post_json", lambda url, payload, ua=None: AR_PAGE)
-    (url, title, where, when), = jobs.aristek("stage.aristeksystems.com")
+    row, = jobs.aristek("stage.aristeksystems.com")
+    url, title, where, when = row[:4]
     assert url == "https://aristeksystems.com/career/senior-go-developer/"
     assert "stage." not in url                 # ссылка из API ведёт на stage
     assert (title, where, when) == ("Senior Go Developer", "Remote", "2026-05-07")
+    # у самой записи content пустой, текст разложен по секциям ACF
+    assert row[6] == "Про компанию Required Skills: 5+ years of Go"
 
 
 ATL_LISTING = [{
@@ -447,7 +467,7 @@ ATL_LISTING = [{
 def test_atlassian_shortens_locations_and_skips_apply_url(monkeypatch):
     """Локации приходят в три колена с индексом; ссылка нужна без mode=apply."""
     monkeypatch.setattr(jobs, "get", lambda url, **kw: ATL_LISTING)
-    (url, title, where, when), = jobs.atlassian("www.atlassian.com")
+    url, title, where, when = jobs.atlassian("www.atlassian.com")[0][:4]
     assert url.endswith("/job") and "mode=apply" not in url
     assert where == "Bengaluru - India, Remote, Remote - UK"
     assert (title, when) == ("Senior Backend Engineer", "2026-09-24")
@@ -469,8 +489,9 @@ def test_peopleforce_pages_until_nothing_new(monkeypatch):
     monkeypatch.setattr(jobs, "get", fake_get)
     rows = jobs.peopleforce("careers.taxdome.com")
     assert len(rows) == 1                       # вторая страница не добавила нового
-    assert len(seen) == 2                       # и дальше не ходим
-    url, title, where, when = rows[0]
+    # страница списка, страница самой вакансии, вторая страница списка
+    assert len(seen) == 3                       # и дальше не ходим
+    url, title, where, when = rows[0][:4]
     assert url == "https://careers.taxdome.com/v/238101-senior-devops-engineer"
     assert title == "Senior Devops & Engineer"
 
@@ -518,3 +539,114 @@ def test_wordpress_keeps_description(monkeypatch):
 def test_plain_text_trims_long_tail():
     assert jobs.plain_text("<p>" + "a" * 20000 + "</p>", limit=100) == "a" * 100
     assert jobs.plain_text("") is None
+
+
+def test_adapters_carry_description(monkeypatch):
+    """Текст приходит в том же ответе — адаптер обязан его донести, а не терять."""
+    monkeypatch.setattr(jobs, "get", lambda url, **kw: {"jobs": [
+        {"jobUrl": "u", "title": "t", "location": "l", "publishedAt": None,
+         "descriptionPlain": "Python и Kafka"}]})
+    (row,) = jobs.ashby("x")
+    assert len(row) == 7 and row[6] == "Python и Kafka"
+
+    monkeypatch.setattr(jobs, "get", lambda url, **kw: {"jobs": [
+        {"absolute_url": "u", "title": "t", "location": {"name": "l"},
+         "content": "<p>Go &amp; k8s</p>"}]})
+    (row,) = jobs.greenhouse("x")
+    assert row[6] == "Go & k8s"
+
+
+def test_greenhouse_asks_for_content(monkeypatch):
+    """Без content=true Greenhouse текст не отдаёт, а лишний запрос не нужен."""
+    seen = []
+    monkeypatch.setattr(jobs, "get", lambda url, **kw: seen.append(url) or {"jobs": []})
+    jobs.greenhouse("x")
+    assert "content=true" in seen[0]
+
+
+NEXT_DATA_HTML = (
+    '<script id="__NEXT_DATA__" type="application/json">'
+    '{"props":{"pageProps":{"positions":['
+    '{"title":"SENIOR PYTHON DEVELOPER","link":"https://talent.sage.hr/jobs/abc",'
+    '"content":"<p>We\'re looking for a Senior Software Engineer.</p>"}]}}}'
+    '</script>'
+)
+
+
+def test_next_data_takes_description_from_card():
+    """У BETBY текст лежит в карточке: ссылка ведёт на Sage HR за Cloudflare."""
+    rows = jobs.next_data(NEXT_DATA_HTML)
+    assert len(rows) == 1
+    assert rows[0][0] == "https://talent.sage.hr/jobs/abc"
+    assert rows[0][6] == "We're looking for a Senior Software Engineer."
+
+
+def test_smartrecruiters_pulls_text_from_each_posting(monkeypatch):
+    """В списке текста нет: он приходит карточкой, без companyDescription."""
+    answers = {
+        "https://api.smartrecruiters.com/v1/companies/gcore/postings": {
+            "totalFound": 1,
+            "content": [{"id": "744", "name": "Go Engineer",
+                         "location": {"city": "Porto", "country": "pt",
+                                      "fullLocation": "Porto, Porto District, Portugal"}}]},
+        "https://api.smartrecruiters.com/v1/companies/gcore/postings/744": {
+            "jobAd": {"sections": {
+                "companyDescription": {"text": "<p>Gcore is great</p>"},
+                "jobDescription": {"text": "<p>Write Go</p>"},
+                "qualifications": {"text": "<p>5 years</p>"}}}},
+    }
+    monkeypatch.setattr(jobs, "get", lambda url, **kw: answers.get(url))
+    rows = jobs.smartrecruiters("gcore")
+    assert rows[0][6] == "Write Go 5 years"
+
+
+def test_sr_place_prefers_country_spelled_out():
+    """country отдаёт код: «London gb» гео-ворота не читают."""
+    assert jobs.sr_place({"city": "London", "country": "gb",
+                          "fullLocation": "London, England, United Kingdom"}) \
+        == "London, England, United Kingdom"
+    # у Gcore страны разъезжаются по полям, а в fullLocation есть пустые куски
+    assert jobs.sr_place({"city": "Serbia", "country": "cy",
+                          "fullLocation": "Serbia, , Cyprus"}) == "Serbia, Cyprus"
+    assert jobs.sr_place({"city": "Porto", "country": "pt"}) == "Porto pt"
+
+
+def test_peopleforce_reads_text_from_job_page(monkeypatch):
+    """Текста в списке нет: страница вакансии — обычный HTML без JS."""
+    listing = ('<a class="stretched-link tw-text-black" '
+               'href="/v/42-backend-engineer">Backend Engineer</a>')
+    pages = {"https://careers.acme.com/?page=1": listing,
+             "https://careers.acme.com/v/42-backend-engineer":
+                 "<h1>Backend Engineer</h1><p>Python, 5+ years</p>"}
+    monkeypatch.setattr(jobs, "get", lambda url, **kw: pages.get(url))
+    rows = jobs.peopleforce("careers.acme.com")
+    assert rows[0][0] == "https://careers.acme.com/v/42-backend-engineer"
+    assert rows[0][6] == "Backend Engineer Python, 5+ years"
+
+
+EPAM_FACETS = {"country": [{"key": "Portugal", "id": "406", "doc_count": 52},
+                           {"key": "Mexico", "id": "405", "doc_count": 1055}]}
+EPAM_JOB = {"name": "Senior Python Developer", "vacancy_type": "Remote",
+            "country": [{"name": "Portugal"}], "created_at": "2026-09-29T08:31:25.011Z",
+            "seo": {"url": "/en/vacancy/senior-python-developer-blt1_en"},
+            "text": "Python, 5+ years"}
+
+
+def test_epam_filters_by_country_id_not_name(monkeypatch):
+    """Страна задаётся id из фасетов: по имени доска отвечает пустым списком."""
+    seen = []
+
+    def fake_get(url, **kw):
+        seen.append(url)
+        if "facets" not in url:
+            return {"data": {"total": 5060, "jobs": [], "facets": EPAM_FACETS}}
+        return {"data": {"total": 1, "jobs": [EPAM_JOB], "facets": EPAM_FACETS}}
+
+    monkeypatch.setattr(jobs, "get", fake_get)
+    row, = jobs.epam("Portugal")
+    assert "facets=country%3D406" in seen[1]
+    assert row[0] == "https://careers.epam.com/en/vacancy/senior-python-developer-blt1_en"
+    assert (row[1], row[2], row[3]) == ("Senior Python Developer", "Remote: Portugal",
+                                        "2026-09-29")
+    assert row[6] == "Python, 5+ years"
+    assert jobs.epam("Атлантида") == []     # страны нет в фасетах, но доска жива
