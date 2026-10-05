@@ -321,11 +321,14 @@ PLACES = re.compile(
     r"|latam|americas|india|bengaluru|bangalore|hyderabad|pune|gurgaon|japan|tokyo"
     r"|singapore|china|hong kong|korea|apac|australia|sydney|melbourne|brisbane"
     r"|auckland|new zealand|philippines|vietnam|indonesia|malaysia|thailand|nigeria"
-    r"|lagos|kenya|egypt|south africa|dubai|\buae\b|united arab|saudi|qatar|kuwait"
+    r"|lagos|kenya|egypt|south africa|dubai|\buae\b|united arab|saudi|\bksa\b|qatar|kuwait"
     r"|israel|turkey|pakistan|san francisco|seattle|austin|new york|boston|chicago"
     r"|denver|atlanta|miami|toronto|vancouver|montreal|gmt-"
-    # Короткие коды в реальных строках: «Remote (US only)», «Remote - US».
-    r"|remote[\s(,/-]*us\b|\bus only\b|\bus-remote\b", re.I)
+    # Код страны отдельным словом: «US - California», «Remote (US only)»,
+    # «Kansas City, US». Границы слова обязательны — иначе Belarus и Aarhus
+    # читаются как Штаты. Проверено на всех 1005 строках локаций в базе:
+    # ловит 34, все действительно американские.
+    r"|\bus\b", re.I)
 
 # Наднациональное: годится почти любому европейцу, уточнять по стране не нужно.
 SUPRA = r"europe|emea|\beu\b|anywhere|worldwide|global"

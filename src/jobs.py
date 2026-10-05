@@ -207,6 +207,17 @@ def greenhouse(s):
              None, "", plain_text(j.get("content"))) for j in d["jobs"]]
 
 
+def lever_text(j):
+    """У Collectly description пустой, а весь текст разложен по lists —
+    «Key Responsibilities», «Required Qualifications» и так далее. Заголовок
+    блока склеиваем с телом, он несёт смысл не меньше самого списка."""
+    body = j.get("descriptionPlain") or j.get("description")
+    if not body:
+        body = " ".join(" ".join(filter(None, (l.get("text"), l.get("content"))))
+                        for l in j.get("lists") or [])
+    return plain_text(" ".join(filter(None, (body, j.get("additionalPlain")))))
+
+
 def lever(s):
     """У европейских аккаунтов свой хост: CoinsPaid живёт на api.eu.lever.co,
     на api.lever.co его нет вовсе."""
@@ -214,8 +225,7 @@ def lever(s):
         d = get(f"https://{host}/v0/postings/{s}?mode=json")
         if isinstance(d, list) and d:
             return [(j["hostedUrl"], j["text"], j.get("categories", {}).get("location", ""),
-                     posted(j.get("createdAt")), None, "",
-                     plain_text(j.get("descriptionPlain") or j.get("description")))
+                     posted(j.get("createdAt")), None, "", lever_text(j))
                     for j in d]
     return None
 
@@ -405,7 +415,10 @@ def plain_text(html, limit=12000):
     обычно состоит из юридических оговорок, а не из требований."""
     if not html:
         return None
-    txt = re.sub(r"<script.*?</script>|<style.*?</style>", " ", html, flags=re.S)
+    # Комментарий убираем до тегов: внутри него бывает своя разметка
+    # («<!--[if IE]><div>…»), и тогда от него остаётся хвост «-->» в тексте.
+    txt = re.sub(r"<!--.*?-->", " ", html, flags=re.S)
+    txt = re.sub(r"<script.*?</script>|<style.*?</style>", " ", txt, flags=re.S)
     txt = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", txt)).strip()
     return html_mod.unescape(txt)[:limit] or None
 
@@ -424,7 +437,9 @@ def wordpress(s):
     for kind in ([kind] if kind else WP_TYPES):
         out = _wp_type(host, kind)
         if out:
-            return out
+            # У Akvelon тип vacancy не отдаёт content через REST: поле просто
+            # не зарегистрировано. Текст дочитываем со страницы вакансии.
+            return page_text(out, f"https://{host}")
     return None
 
 
@@ -834,7 +849,53 @@ def linked_jobs(html, url):
     return out
 
 
-def embedded(url):
+# Dover отдаёт пустую оболочку SPA, а карточку — своим API, без ключа.
+# Путь подсмотрен в их же openapi-бандле: /apply/<клиент>/<id> ведёт сюда.
+DOVER_JOB = re.compile(r"app\.dover\.com/apply/[^/]+/([0-9a-f-]{36})")
+
+
+def dover_job(url):
+    """(локация, текст) по ссылке на Dover. (None, None), если это не он."""
+    m = DOVER_JOB.search(url)
+    if not m:
+        return None, None
+    d = get(f"https://app.dover.com/api/v1/inbound/application-portal-job/{m.group(1)}")
+    if not isinstance(d, dict):
+        return None, None
+    where = ", ".join(dict.fromkeys(
+        l.get("name") for l in d.get("locations") or [] if l.get("name")))
+    remote = any(l.get("location_type") == "REMOTE" for l in d.get("locations") or [])
+    if remote and where:
+        where = f"Remote: {where}"
+    return where or None, plain_text(d.get("user_provided_description"))
+
+
+def page_text(rows, listing):
+    """Дочитать текст тем вакансиям, у которых его нет: страница вакансии —
+    обычный HTML, и целиком она годится не хуже вырезанного куска.
+
+    Только для известной компании, не при разведке: там половина «вакансий» —
+    случайные ссылки, и запрос на каждую обошёлся бы дороже находки."""
+    out = []
+    for r in rows:
+        r = tuple(r) + (None,) * (7 - len(r))
+        if not r[6] and r[0] and r[0].startswith("http") and r[0].rstrip("/") != listing.rstrip("/"):
+            where, text = dover_job(r[0])
+            if where and not r[2]:
+                r = r[:2] + (where,) + r[3:]
+            if not text:
+                page = get(r[0], want_json=False)
+                text = plain_text(page) if isinstance(page, str) else None
+            # ponytail: порог в 300 символов отсекает оболочку SPA («You need to
+            # enable JavaScript»), какую отдаёт Dover у Surfe. Пустое поле честнее
+            # мусора: по нему видно, что текста нет. Понадобится тоньше — смотреть
+            # на долю букв в строке, а не на длину.
+            r = r[:6] + (text if text and len(text) >= 300 else None,)
+        out.append(r)
+    return out
+
+
+def embedded(url, with_text=False):
     """Ступень 3: вакансии лежат в HTML, а не в API. Так устроены top.co
     (свой формат), betby.com (__NEXT_DATA__) и xata.io (ссылки на свой сайт)."""
     html = get(url, want_json=False)
@@ -843,8 +904,9 @@ def embedded(url):
     base = url.rstrip("/")
     out = [(f"{base}/{jid}", title.strip(), company.strip(), None)
            for jid, title, company in JOB_IN_PAYLOAD.findall(html)]
-    return (out or next_data(html) or linked_jobs(html, url)
+    rows = (out or next_data(html) or linked_jobs(html, url)
             or notion_jobs(html) or apply_links(html) or flight_jobs(html, url))
+    return page_text(rows, url) if rows and with_text else rows
 
 
 def diagnose(ats, slug, url):
@@ -874,7 +936,10 @@ def page_hash(url):
     html = get(url, want_json=False)
     if not html:
         return None
-    txt = re.sub(r"<script.*?</script>|<style.*?</style>", " ", html, flags=re.S)
+    # Комментарий убираем до тегов: внутри него бывает своя разметка
+    # («<!--[if IE]><div>…»), и тогда от него остаётся хвост «-->» в тексте.
+    txt = re.sub(r"<!--.*?-->", " ", html, flags=re.S)
+    txt = re.sub(r"<script.*?</script>|<style.*?</style>", " ", txt, flags=re.S)
     txt = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", txt))
     return hashlib.md5(txt.encode()).hexdigest()
 
@@ -891,7 +956,7 @@ def collect(name, url, cache):
     Workable режет параллельные запросы, и компания молча теряется."""
     ats, slug = cache.get(name, (None, None))
     if ats == "embedded":
-        return name, ats, slug, embedded(url) or [], None
+        return name, ats, slug, embedded(url, with_text=True) or [], None
     if ats:
         # None (доска не ответила) не схлопывать в []: иначе 429 от Workable
         # попадает в отчёт как «доска вернула пустой список» и diagnose молчит
@@ -982,6 +1047,11 @@ def run(only=None):
                                 storage.dedup_key(name, title), desc))
             if not cur.rowcount and who:
                 conn.execute("UPDATE jobs SET contact=? WHERE url=? AND contact IS NULL", (who, j_url))
+            if not cur.rowcount and loc:
+                # локацию адаптер иногда узнаёт позже, чем саму вакансию:
+                # у Surfe она пришла только после разбора API Dover
+                conn.execute("UPDATE jobs SET location=? WHERE url=? "
+                             "AND (location IS NULL OR location='')", (loc, j_url))
             if not cur.rowcount and pay:
                 conn.execute("UPDATE jobs SET salary=? WHERE url=? AND salary IS NULL", (pay, j_url))
             if not cur.rowcount and desc:

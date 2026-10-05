@@ -115,6 +115,14 @@ def test_gate_cuts_foreign_only_locations():
     assert gated("Senior Backend Engineer", "New York, NY. Remote (US only)")
     assert gated("Senior Backend Engineer", "Bengaluru - India, Remote")
     assert gated("Senior Backend Engineer", "GMT-6")
+    # Tabby пишет Саудовскую Аравию аббревиатурой, полное имя в строке не стоит
+    assert gated("Senior DevOps Engineer", "KSA, Onsite")
+    # код страны отдельным словом, без слова Remote рядом
+    assert gated("Senior Backend Engineer", "Kansas City, US")
+    assert gated("Senior Backend Engineer", "US - California")
+    # границы слова: страна внутри другого слова — не Штаты
+    assert not gated("Senior Backend Engineer", "Belarus")
+    assert not gated("Senior Backend Engineer", "Aarhus, Denmark")
 
 
 def test_gate_keeps_multicountry_with_one_match():
@@ -146,7 +154,8 @@ def test_gate_off_when_relocation_allowed():
 
 def test_gate_reason_names_the_match():
     """Молчаливый отказ не отследить при ручном разборе."""
-    assert "Remote US" in bot.gate_reason(SENIOR, "Senior Backend Engineer", "Remote US")
+    # в причине стоит найденное слово, а не вся строка локации
+    assert "«US»" in bot.gate_reason(SENIOR, "Senior Backend Engineer", "Remote US")
     assert "Junior" in bot.gate_reason(SENIOR, "Junior Backend Engineer", "Porto")
 
 

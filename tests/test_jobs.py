@@ -650,3 +650,44 @@ def test_epam_filters_by_country_id_not_name(monkeypatch):
                                         "2026-09-29")
     assert row[6] == "Python, 5+ years"
     assert jobs.epam("Атлантида") == []     # страны нет в фасетах, но доска жива
+
+
+def test_page_text_only_fills_what_is_missing(monkeypatch):
+    """У BETBY текст уже есть, а ссылка ведёт на Sage HR за Cloudflare: лишний
+    запрос туда ничего не даст. Дочитываем только пустые."""
+    seen = []
+    page = "<p>Python, 5+ years. " + "Опыт с Kubernetes и PostgreSQL. " * 12 + "</p>"
+    monkeypatch.setattr(jobs, "get", lambda url, **kw: seen.append(url) or page)
+    rows = jobs.page_text(
+        [("https://acme.test/jobs/1", "Backend", "Porto", None, None, "", "уже есть"),
+         ("https://acme.test/jobs/2", "Frontend", "Porto", None)],
+        "https://acme.test/jobs")
+    assert seen == ["https://acme.test/jobs/2"]
+    assert rows[0][6] == "уже есть"
+    assert rows[1][6].startswith("Python, 5+ years.")
+    assert len(rows[1]) == 7                   # короткая строка дополнена до семи
+
+
+def test_page_text_drops_a_javascript_stub(monkeypatch):
+    """Dover у Surfe отдаёт оболочку SPA: пустое поле честнее такого «текста»."""
+    monkeypatch.setattr(jobs, "get",
+                        lambda url, **kw: "<p>You need to enable JavaScript to run this app.</p>")
+    rows = jobs.page_text([("https://acme.test/jobs/1", "Backend", "Porto", None)],
+                          "https://acme.test/jobs")
+    assert rows[0][6] is None
+
+
+def test_dover_job_takes_card_from_api(monkeypatch):
+    """app.dover.com отдаёт оболочку SPA, карточку — свой API без ключа."""
+    card = {"user_provided_description": "<h1>Who You Are</h1><p>Senior Backend</p>",
+            "locations": [{"name": "Europe", "location_type": "REMOTE"},
+                          {"name": "Europe", "location_type": "REMOTE"}]}
+    seen = []
+    monkeypatch.setattr(jobs, "get", lambda url, **kw: seen.append(url) or card)
+    where, text = jobs.dover_job(
+        "https://app.dover.com/apply/surfe/b812b5b6-42b6-417a-923c-7737ba82a06f")
+    assert seen == ["https://app.dover.com/api/v1/inbound/application-portal-job/"
+                    "b812b5b6-42b6-417a-923c-7737ba82a06f"]
+    assert where == "Remote: Europe"           # повтор локации схлопнут
+    assert text == "Who You Are Senior Backend"
+    assert jobs.dover_job("https://acme.test/jobs/1") == (None, None)
