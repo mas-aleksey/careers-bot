@@ -198,6 +198,9 @@ def build_profile(conn, tg_id, cv_path):
                  "ON CONFLICT(tg_id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at",
                  (tg_id, json.dumps(data, ensure_ascii=False), now()))
     conn.commit()
+    # Новое резюме — тот же случай, что и правка: у нового профиля матчей нет,
+    # rescore просто сразу пускает оценку, не дожидаясь таймера.
+    rescore(conn, tg_id)
     return data
 
 
@@ -213,18 +216,27 @@ def get_profile(conn, tg_id):
 
 # --- оценка вакансий ---------------------------------------------------------
 
-SCORE_SYSTEM = """Ты оцениваешь вакансии под профиль кандидата.
+SCORE_SYSTEM = """Ты оцениваешь вакансии под профиль кандидата. На входе —
+текст вакансии, читай его, а не только заголовок.
 
 Сто баллов складываются так: стек и домен 40, роль и уровень 35, география и
-оформление 25. Денег в баллах нет — вилку называют редко, она бы только сдвинула
-шкалу всем одинаково.
+оформление 25. Денег в баллах нет.
 
-Блокеры дают ровно 0, а не пониженный балл:
-- junior-позиция, стажировка или trainee;
-- страна найма, откуда кандидата нанять нельзя;
-- onsite или обязательная релокация, если кандидат их не рассматривает;
-- гибрид, если кандидат его не рассматривает;
-- другая профессия.
+Стек сверяется в ОДНУ сторону: покрывает ли кандидат требования вакансии.
+Технологии из профиля, которые этой вакансии не нужны, баллов НЕ снимают.
+Полное покрытие обязательных требований — это полные 40, даже если прочие
+навыки кандидата здесь не задействованы. Технология из раздела «будет плюсом»
+весит меньше той, что в обязательных требованиях.
+
+Домены в профиле — список подходящих, а не обязательных. Совпадение по любому
+из них плюс, несовпадение само по себе не блокер.
+
+Оценивай по явным требованиям и условиям. Описание компании, миссия и
+перечисление льгот на балл не влияют.
+
+Локация в поле — подсказка, а не истина. Она бывает пустой, неполной или
+противоречит тексту. Пустое поле локации само по себе НЕ блокер: страну найма
+ищи в тексте вакансии. Если текст и поле расходятся — верь тексту.
 
 Пометка «Remote» вместе с регионом (Americas, APAC, US) означает удалёнку внутри
 этого региона, а не по миру.
@@ -234,79 +246,135 @@ SCORE_SYSTEM = """Ты оцениваешь вакансии под профил
 вакансия уровнем выше кандидата тоже не блокер, смотри на требования, а не на
 слово в названии.
 
-Верни JSON: {"scores": [{"url": "...", "pct": 0-100, "why": "одно предложение"}]}
-Оценивай каждую присланную вакансию, порядок сохраняй. why — по-русски, коротко,
-именно про совпадение с этим кандидатом.
+Блокеры дают ровно 0, а не пониженный балл:
+- junior-позиция, стажировка или trainee;
+- страна найма, откуда кандидата нанять нельзя;
+- onsite или обязательная релокация, если кандидат их не рассматривает;
+- гибрид, если кандидат его не рассматривает;
+- другая профессия.
+
+Верни JSON: {"scores": [{"url": "...", "pct": 0-100, "where": "...", "why": "..."}]}
+
+where — что о стране найма и формате работы сказано в тексте, с опорой на текст,
+а не на поле локации. Коротко, до 80 символов.
+why — НЕ БОЛЬШЕ 400 символов, две-три фразы по-русски, в таком порядке:
+1) что совпало: назови технологии из обязательных требований и домен. Если стек
+   в тексте не назван, так и скажи, не достраивай его по названию должности;
+2) что не совпало или вызывает сомнение;
+3) если балл 0 — блокер прямо и одной фразой.
+Пиши плотно, без вводных и повторов: географию не повторяй, она уже в where. Не пересказывай вакансию, пиши про совпадение с ЭТИМ кандидатом.
+Общих фраз вроде «хорошая возможность» не используй.
+
+Оценивай каждую присланную вакансию, порядок сохраняй.
 
 В ответе только JSON, без пояснений до или после него."""
 
-BATCH = 20
-TRIAGE_BATCH = 50
+BATCH = 6              # с текстом пачка тяжелее: двадцать длинных
+                       # описаний в одном запросе оцениваются небрежно
+SCORE_CHARS = 3000     # требования лежат в первой половине текста
+SCORE_SLICE = 120      # вакансий за один проход: потолок расхода на цикл
+WHY_CHARS = 400        # обоснование: выходные токены впятеро дороже входных
+WHERE_CHARS = 80       # строка про страну найма и формат
+TRIAGE_BATCH = 10      # с текстом пачка тяжелее, и на длинном входе модель
+                       # чаще не перечисляет всё, что ей дали
+TRIAGE_FLOOR = 15      # ниже — к дорогой модели не пускаем
+TRIAGE_CHARS = 3000    # медиана первого упоминания стека — 1286-й символ
+RESCORE_TOP = 20       # сколько вакансий истории дооценивать после смены
+                       # профиля: не полный пересчёт, а верхушка по баллу
+                       # дешёвой модели. Замеры 2026-10-06: Sonnet на всю
+                       # историю это $2.40, на верхушку — пять центов
 
-TRIAGE_SYSTEM = """Отсев перед дорогой оценкой. Тебе дают кандидата и список
-вакансий с номерами: должность и локация.
+TRIAGE_SYSTEM = """Ты отбираешь вакансии для кандидата перед дорогой оценкой.
 
-Верни JSON: {"keep": [номера тех, кого имеет смысл оценивать подробно]}.
+Смотри ТОЛЬКО на три вещи: профессия, стек и грейд. Географию не оценивай
+вообще — её уже проверили до тебя, локацию игнорируй.
 
-Выкидывай по двум причинам, обе жёсткие:
+Верни JSON: {"scores": [{"url": "...", "pct": 0-100}]}
+pct — насколько вакансия профессионально близка кандидату:
+- 0 — другая профессия;
+- 1-30 — та же область, но стек и задачи не те;
+- 31-60 — смежная роль или частичное совпадение стека;
+- 61-100 — профессия и стек совпадают.
 
-1. Другая профессия. Соседние считаются своими: для аналитика это product
-manager, product owner, solution architect; для бэкенда — platform,
-infrastructure, SRE. Маркетинг, продажи, поддержка, бухгалтерия, рекрутинг —
-не относятся ни к чему из этого.
+Соседние профессии считаются своими: для аналитика это product manager,
+product owner, solution architect; для бэкенда — platform, infrastructure, SRE.
 
-2. Недоступная география. Локация привязана к стране или городу, откуда этого
-кандидата нанять нельзя, и его регион не упомянут. Пометка «Remote» вместе с
-регионом (US, Americas, APAC) означает удалёнку внутри региона, а не по миру.
-Если в локации рядом стоит регион кандидата — это не блокер.
+Грейд: junior и стажировки — 0. Middle и выше штрафом не считается.
+Технология из раздела «будет плюсом» весит меньше обязательной.
 
-Голый «Remote», «Anywhere», «Fully remote» без страны и региона — НЕ блокер,
-оставляй. Пустая локация — тоже не блокер. Отсутствие страны значит, что её
-не указали, а не что кандидат не подходит.
-
-Сомневаешься — оставляй: лишняя оценка стоит центы, потерянная вакансия — нет."""
+Оценивай каждую присланную вакансию, порядок сохраняй. Только JSON."""
 
 
 def triage(profile, rows):
-    """Кто вообще из этой профессии. Дешёвая модель, только заголовки."""
+    """Балл по профессии и стеку дешёвой моделью. Возвращает (прошедшие, баллы).
+
+    Невернувшиеся проходят дальше: молчание модели — это «не знаю», а не ноль,
+    и терять из-за него вакансию дороже, чем оценить лишнюю."""
     import llm
-    listing = "\n".join(f"{i+1}. {t} — {loc or 'локация не указана'}"
-                        for i, (_, _, t, loc) in enumerate(rows))
+    listing = "\n\n".join(
+        f'{i+1}. url={u}\n   {t}\n   {(d or "")[:TRIAGE_CHARS]}'
+        for i, (u, _, t, _, d) in enumerate(rows))
+    short = {k: profile.get(k) for k in ("role", "level", "stack", "domains", "looking_for")}
     out = llm.ask_json(
         TRIAGE_SYSTEM,
-        f"ПРОФЕССИЯ: {profile.get('role', '')}, уровень {profile.get('level', '')}\n"
-        f"ГДЕ: {profile.get('location', '')}, часовой пояс {profile.get('timezone', '')}\n"
-        f"РЕЛОКАЦИЯ: {profile.get('relocation', '')}\n"
-        f"ГИБРИД: {profile.get('hybrid', '')}\n\n"
-        f"ВАКАНСИИ:\n{listing}",
-        model=llm.TRIAGE_MODEL, max_tokens=1500)
-    keep = {int(n) for n in out.get("keep", []) if str(n).isdigit()}
-    return [r for i, r in enumerate(rows, 1) if i in keep]
+        "ПРОФИЛЬ: " + json.dumps(short, ensure_ascii=False) + f"\n\nВАКАНСИИ:\n{listing}",
+        model=llm.TRIAGE_MODEL, max_tokens=2000)
+    known = {r[0] for r in rows}
+    seen = {x.get("url"): int(x.get("pct") or 0)
+            for x in out.get("scores", []) if x.get("url") in known}
+    return [r for r in rows if seen.get(r[0], TRIAGE_FLOOR) >= TRIAGE_FLOOR], seen
 
 
 def score_batch(profile, rows):
-    """rows: [(url, company, title, location)] -> [(url, pct, why)]"""
+    """rows: [(url, company, title, location, description)] -> [(url, pct, why)]
+
+    Текст идёт блоками, а не одной строкой: модели нужно видеть, где кончается
+    поле и начинается описание. Обрезка на SCORE_CHARS — требования лежат в
+    первой половине, дальше обычно льготы и юридические оговорки."""
     import llm
-    jobs_txt = "\n".join(
-        f'{i+1}. url={u} | {c} | {t} | {loc or "локация не указана"}'
-        for i, (u, c, t, loc) in enumerate(rows))
+    jobs_txt = "\n\n".join(
+        f'{i+1}. url={u}\n   компания: {c}\n   должность: {t}\n'
+        f'   локация (поле): {loc or "не указана"}\n'
+        f'   текст вакансии:\n   {(d or "текста нет")[:SCORE_CHARS]}'
+        for i, (u, c, t, loc, d) in enumerate(rows))
     out = llm.ask_json(SCORE_SYSTEM,
                        "ПРОФИЛЬ:\n" + json.dumps(profile, ensure_ascii=False) +
                        "\n\nВАКАНСИИ:\n" + jobs_txt,
-                       max_tokens=4000)
+                       max_tokens=8000)
     known = {u for u, *_ in rows}
-    return [(x["url"], int(x.get("pct") or 0), str(x.get("why", ""))[:200])
-            for x in out.get("scores", []) if x.get("url") in known]
+    out_rows = []
+    for x in out.get("scores", []):
+        if x.get("url") not in known:
+            continue
+        why = str(x.get("why", "")).strip()[:WHY_CHARS]
+        # Стек отдельным полем не просим: он и так назван в why, а выходные
+        # токены стоят впятеро дороже входных. География остаётся — поле
+        # локации ей не замена, у BNP оно пустое у всех 213 вакансий.
+        where = str(x.get("where") or "").strip()[:WHERE_CHARS]
+        if where:
+            why = f"{why}\n{where}" if why else where
+        out_rows.append((x["url"], int(x.get("pct") or 0), why))
+    return out_rows
 
 
-def spread(conn, tg_id, url, pct, why):
+def spread(conn, tg_id, url, pct, why, profile=None, triage_pct=None):
     """Оценка ложится на всю группу дублей разом: одна и та же вакансия под
-    десятью ссылками должна и оцениваться, и не отправляться одинаково."""
-    conn.execute("""
-        INSERT OR REPLACE INTO matches(tg_id, job_url, pct, why, scored_at)
-        SELECT ?, url, ?, ?, ? FROM jobs
-        WHERE dedup = (SELECT dedup FROM jobs WHERE url = ?) AND closed_at IS NULL""",
-        (tg_id, pct, why, now(), url))
+    десятью ссылками должна и оцениваться, и не отправляться одинаково.
+
+    Но ключ дедупликации — компания и должность без локации, а значит в одной
+    группе лежат и «remote», и «San Francisco». Проходной балл на такую группу
+    разносить нельзя: удалённая вакансия протащила бы за собой офисную.
+    Поэтому при ненулевом балле строки, которые отбрасывают ворота, получают
+    свой отказ, а не чужой балл."""
+    rows = conn.execute(
+        "SELECT url, title, location FROM jobs WHERE dedup = "
+        "(SELECT dedup FROM jobs WHERE url = ?) AND closed_at IS NULL", (url,)).fetchall()
+    profile = profile if profile is not None else get_profile(conn, tg_id)
+    for u, title, loc in rows:
+        blocked = gate_reason(profile, title, loc) if (pct and profile) else None
+        conn.execute("INSERT OR REPLACE INTO matches"
+                     "(tg_id, job_url, pct, why, scored_at, triage_pct) VALUES(?,?,?,?,?,?)",
+                     (tg_id, u, 0 if blocked else pct, blocked or why, now(), triage_pct))
 
 
 # --- ворота до моделей -------------------------------------------------------
@@ -381,16 +449,66 @@ def gate_reason(profile, title, location):
     return None
 
 
-def score_pending(conn, tg_id, limit=200):
+def backlog_pass(conn, tg_id):
+    """Разовый проход по истории после смены профиля: дешёвая модель по всему,
+    дорогая — только по верхушке.
+
+    Всё, что не попало в верхушку, получает ноль с указанием балла. Иначе
+    обычный цикл подобрал бы их как неоценённые и позвал бы дорогую модель на
+    каждую: на сегодняшней базе это 970 вызовов вместо двадцати."""
+    profile = get_profile(conn, tg_id)
+    if not profile:
+        return 0
+    rows = conn.execute("""
+        SELECT j.url, j.company, j.title, j.location, j.description FROM jobs j
+        LEFT JOIN matches m ON m.job_url = j.url AND m.tg_id = ?
+        WHERE m.job_url IS NULL AND j.closed_at IS NULL
+        GROUP BY j.dedup""", (tg_id,)).fetchall()
+    kept = []
+    for r in rows:
+        why = gate_reason(profile, r[2], r[3])
+        if why:
+            spread(conn, tg_id, r[0], 0, why, profile=profile)
+        else:
+            kept.append(r)
+    conn.commit()
+    scores = {}
+    for i in range(0, len(kept), TRIAGE_BATCH):
+        part = kept[i:i + TRIAGE_BATCH]
+        try:
+            _, got = triage(profile, part)
+        except Exception as e:
+            log("triage-error", tg_id, repr(e))
+            got = {}
+        scores.update(got)
+    # Молчание модели в доборке читаем как ноль, а не как «не знаю»: здесь
+    # пропуск стоит вызова дорогой модели, а вакансия всё равно не свежая.
+    ranked = sorted(kept, key=lambda r: (scores.get(r[0], 0), r[0]), reverse=True)
+    top = {r[0] for r in ranked[:RESCORE_TOP]}
+    for r in ranked:
+        if r[0] not in top:
+            spread(conn, tg_id, r[0], 0,
+                   f"история: балл триажа {scores.get(r[0], 0)}, не в верхушке",
+                   profile=profile, triage_pct=scores.get(r[0]))
+    conn.commit()
+    log("backlog", tg_id, f"история {len(rows)}, к дорогой модели {len(top)}")
+    return {u: scores.get(u, 0) for u in top}
+
+
+def score_pending(conn, tg_id, limit=SCORE_SLICE, known_triage=None):
     """Оценивает то, что для этого профиля ещё не оценено. Закрытые пропускаем:
-    платить за оценку снятой вакансии незачем."""
+    платить за оценку снятой вакансии незачем.
+
+    known_triage — вакансии, которые уже прошли триаж в доборке истории. Их не
+    гоняем через дешёвую модель второй раз: это не только лишняя пачка, но и
+    риск, что недетерминированная модель отсеет то, что сама же отобрала."""
     profile = get_profile(conn, tg_id)
     if not profile:
         return 0
     # По одной вакансии из группы дублей: у Mozilla десять url на одну должность,
     # платить за неё десять раз незачем. Результат раскладывается на всю группу.
     rows = conn.execute("""
-        SELECT j.url, j.company, j.title, j.location FROM jobs j
+        SELECT j.url, j.company, j.title, j.location, j.description FROM jobs j
         LEFT JOIN matches m ON m.job_url = j.url AND m.tg_id = ?
         WHERE m.job_url IS NULL AND j.closed_at IS NULL
         GROUP BY j.dedup
@@ -410,19 +528,32 @@ def score_pending(conn, tg_id, limit=200):
     rows = passed
 
     # Первый проход дешёвой моделью: отсеянным сразу ноль, без оплаты основной.
-    survivors = []
-    for i in range(0, len(rows), TRIAGE_BATCH):
-        part = rows[i:i + TRIAGE_BATCH]
+    # Баллы копим по всем, включая прошедших: по ним калибруется порог, а
+    # внутри batch-цикла они теряются.
+    known_triage = known_triage or {}
+    survivors = [r for r in rows if r[0] in known_triage]
+    triage_pct = dict(known_triage)
+    todo = [r for r in rows if r[0] not in known_triage]
+    for i in range(0, len(todo), TRIAGE_BATCH):
+        part = todo[i:i + TRIAGE_BATCH]
+        scores = {}
         try:
-            keep = triage(profile, part)
+            keep, scores = triage(profile, part)
         except Exception as e:
             log("triage-error", tg_id, repr(e))
             keep = part                      # не смогли отсеять — оцениваем всё
         survivors += keep
-        for url, *_ in part:
-            if url not in {u for u, *_ in keep}:
-                spread(conn, tg_id, url, 0, "профессия или география мимо")
-    conn.commit()
+        triage_pct.update(scores)
+        kept = {u for u, *_ in keep}
+        for row in part:
+            if row[0] not in kept:
+                spread(conn, tg_id, row[0], 0,
+                       f"профессия и стек мимо: предварительный балл {scores.get(row[0], 0)}",
+                       triage_pct=scores.get(row[0], 0))
+        # Коммит после каждой пачки: между вызовами модели проходят секунды, и
+        # незакрытая транзакция всё это время держит запись в базе — сборщик,
+        # рассылка и команды бота ждут её молча.
+        conn.commit()
     if len(rows) != len(survivors):
         log("triage", tg_id, f"{len(survivors)} из {len(rows)}")
     rows = survivors
@@ -444,7 +575,7 @@ def score_pending(conn, tg_id, limit=200):
         if len(scored) < len(chunk):
             log("score-short", tg_id, f"{len(scored)} из {len(chunk)}")
         for url, pct, why in scored:
-            spread(conn, tg_id, url, pct, why)
+            spread(conn, tg_id, url, pct, why, triage_pct=triage_pct.get(url))
         conn.commit()
         done += len(scored)
     if done:
@@ -488,6 +619,32 @@ def add_company(conn, text, tg_id=None):
     return f"Добавил {name}: доска на {found[0]}, сейчас {len(rows)} вакансий. Оценю в ближайший проход."
 
 
+def rescore(conn, tg_id):
+    """Профиль изменился — прежние оценки под него больше не действительны.
+
+    История не пересчитывается целиком: дорого и незачем. Снимаем оценки со
+    всего, что ещё не отправляли, и помечаем это как доборку — дальше
+    score_pending прогонит их дешёвой моделью и дооценит дорогой только
+    верхушку по её баллу.
+
+    Уже отправленное не трогаем: человек это видел, второй раз не придёт."""
+    n = conn.execute(
+        "DELETE FROM matches WHERE tg_id = ? AND job_url IN ("
+        "  SELECT j.url FROM jobs j WHERE j.closed_at IS NULL"
+        "   AND NOT EXISTS (SELECT 1 FROM sent s WHERE s.tg_id = ?"
+        "                    AND (s.job_url = j.url OR s.dedup = j.dedup)))",
+        (tg_id, tg_id)).rowcount
+    conn.execute("INSERT INTO meta(key,value) VALUES(?,'1') "
+                 "ON CONFLICT(key) DO UPDATE SET value='1'", (backlog_key(tg_id),))
+    conn.commit()
+    log("rescore", tg_id, f"снято оценок {n}")
+    SCORE_WAKE.set()
+
+
+def backlog_key(tg_id):
+    return f"backlog:{tg_id}"
+
+
 def apply_edit(conn, tg_id, text):
     import llm
     cur = get_profile(conn, tg_id)
@@ -506,9 +663,7 @@ def apply_edit(conn, tg_id, text):
                  (json.dumps(data, ensure_ascii=False), now(), tg_id))
     conn.execute("INSERT INTO profile_edits(tg_id,text,changed,created_at) VALUES(?,?,?,?)",
                  (tg_id, text, changed, now()))
-    # профиль изменился — старые оценки больше не действительны
-    conn.execute("DELETE FROM matches WHERE tg_id=?", (tg_id,))
-    conn.commit()
+    rescore(conn, tg_id)
     return (f"{changed}\n\n" if changed else "") + render_db_profile(conn, tg_id)
 
 
@@ -911,22 +1066,39 @@ def setup_commands(conn):
              scope=json.dumps({"type": "chat", "chat_id": admin[0]}))
 
 
-COLLECT_EVERY = 12 * 3600
+COLLECT_EVERY = 4 * 3600
 COLLECTOR = str(Path(__file__).with_name("jobs.py"))
 
 
 SCORE_EVERY = 900
+# Таймер остаётся фоном, а не единственным источником запуска: ждать 15 минут
+# после обхода или после правки профиля не из чего. Будят обход, /cv и /edit.
+SCORE_WAKE = threading.Event()
 
 
 def scorer_loop():
-    """Оценка новых вакансий под каждый профиль. Отдельный поток: один вызов
-    LLM на двадцать вакансий, при пустой очереди не стоит ничего."""
+    """Оценка новых вакансий под каждый профиль. Отдельный поток: при пустой
+    очереди не стоит ничего.
+
+    Порция ограничена: с текстом вакансии пачка из шести весит около 5.5 тысяч
+    токенов, и накопившаяся за большой сбор тысяча вакансий за один проход
+    обошлась бы в несколько долларов. SCORE_SLICE за цикл в 15 минут — это
+    больше 11 тысяч вакансий в сутки, то есть с запасом к потоку в сотню."""
     while True:
-        time.sleep(SCORE_EVERY)
+        SCORE_WAKE.wait(SCORE_EVERY)
+        SCORE_WAKE.clear()
         try:
             conn = db()
-            for (tg_id,) in conn.execute("SELECT tg_id FROM profiles"):
-                score_pending(conn, tg_id)
+            for (tg_id,) in conn.execute("SELECT tg_id FROM profiles").fetchall():
+                known = None
+                # Доборка истории идёт первой и ровно один раз на смену профиля:
+                # флаг снимаем сразу, чтобы сбой дорогой модели её не повторил.
+                if conn.execute("SELECT 1 FROM meta WHERE key=?",
+                                (backlog_key(tg_id),)).fetchone():
+                    conn.execute("DELETE FROM meta WHERE key=?", (backlog_key(tg_id),))
+                    conn.commit()
+                    known = backlog_pass(conn, tg_id)
+                score_pending(conn, tg_id, known_triage=known)
             conn.close()
         except Exception as e:
             log("scorer-error", repr(e))
@@ -983,6 +1155,7 @@ def collector_loop():
                                text=True, timeout=3600)
             tail = (r.stdout or r.stderr).strip().split("\n")[-1][:200]
             log("collect", r.returncode, tail)
+            SCORE_WAKE.set()      # будим, когда сборщик уже отпустил базу
         except Exception as e:
             log("collect-error", repr(e))
         time.sleep(COLLECT_EVERY)

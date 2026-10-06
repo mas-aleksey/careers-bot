@@ -164,3 +164,215 @@ def test_score_prompt_allows_middle():
     assert "junior-позиция, стажировка или trainee" in bot.SCORE_SYSTEM
     assert "уровень ниже, чем у кандидата" not in bot.SCORE_SYSTEM
     assert "Middle и middle+" in bot.SCORE_SYSTEM
+
+
+TRIAGE_ROWS = [("u1", "Co", "Senior Backend Engineer", "Porto", "Python, Kafka"),
+               ("u2", "Co", "Retail Account Manager", "Porto", "продажи"),
+               ("u3", "Co", "Staff Platform Engineer", "Porto", "Go, k8s")]
+
+
+def test_triage_keeps_by_score_and_passes_silence(monkeypatch):
+    """Невернувшаяся вакансия идёт дальше: молчание модели — «не знаю», не ноль."""
+    monkeypatch.setattr(bot, "TRIAGE_FLOOR", 15)
+    import llm
+    monkeypatch.setattr(llm, "ask_json", lambda *a, **k: {"scores": [
+        {"url": "u1", "pct": 80}, {"url": "u2", "pct": 0}]})
+    keep, scores = bot.triage({"role": "backend"}, TRIAGE_ROWS)
+    assert [r[0] for r in keep] == ["u1", "u3"]   # u3 модель не вернула — пропущен
+    assert scores == {"u1": 80, "u2": 0}
+
+
+def test_triage_sends_description_slice(monkeypatch):
+    """Стек в тексте впервые встречается около 1286-го символа — заголовка мало."""
+    seen = {}
+    import llm
+
+    def fake(system, user, **kw):
+        seen["user"] = user
+        return {"scores": []}
+
+    monkeypatch.setattr(llm, "ask_json", fake)
+    bot.triage({"role": "backend"}, TRIAGE_ROWS)
+    assert "Python, Kafka" in seen["user"]
+    assert "Porto" not in seen["user"]            # локация триажу не нужна
+
+
+SCORE_ROWS = [("u1", "BNP", "Senior Python Developer", "", "Python, SQL, Portugal, hybrid")]
+
+
+def test_score_batch_sends_text_and_keeps_where_stack(monkeypatch):
+    """Текст идёт в запрос, а where и stack попадают в обоснование карточки."""
+    seen = {}
+    import llm
+
+    def fake(system, user, **kw):
+        seen["user"] = user
+        return {"scores": [{"url": "u1", "pct": 85, "where": "Portugal, hybrid",
+                            "why": "Совпали Python и SQL, домен банковский."}]}
+
+    monkeypatch.setattr(llm, "ask_json", fake)
+    (url, pct, why), = bot.score_batch({"role": "backend"}, SCORE_ROWS)
+    assert "текст вакансии" in seen["user"] and "Python, SQL, Portugal" in seen["user"]
+    assert (url, pct) == ("u1", 85)
+    assert "Совпали Python и SQL" in why and "Portugal, hybrid" in why
+
+
+def test_score_prompt_caps_why():
+    """Выходные токены впятеро дороже входных — длинное why стоит денег."""
+    assert "НЕ БОЛЬШЕ 400 символов" in bot.SCORE_SYSTEM
+    assert "страну найма\nищи в тексте" in bot.SCORE_SYSTEM
+
+
+def test_spread_does_not_drag_office_rows_through():
+    """Ключ дедупликации без локации: «remote» и «San Francisco» в одной группе."""
+    import storage
+    conn = storage.connect()
+    try:
+        for u, loc in (("sp-remote", "remote"), ("sp-sf", "San Francisco")):
+            conn.execute("INSERT OR REPLACE INTO jobs(url,company,title,location,dedup) "
+                         "VALUES(?,?,?,?,?)", (u, "Clera", "Senior Software Engineer",
+                                               loc, "clera|seniorsoftwareengineer"))
+        bot.spread(conn, 1, "sp-remote", 72, "подходит", profile=SENIOR)
+        got = dict(conn.execute("SELECT job_url, pct FROM matches WHERE tg_id=1"))
+        assert got["sp-remote"] == 72
+        assert got["sp-sf"] == 0               # офис не наследует балл удалённой
+        why = conn.execute("SELECT why FROM matches WHERE job_url='sp-sf'").fetchone()[0]
+        assert "San Francisco" in why
+
+        # Отказ по-прежнему разносится на всю группу: платить за дубли незачем.
+        bot.spread(conn, 1, "sp-remote", 0, "другая профессия", profile=SENIOR)
+        after = dict(conn.execute("SELECT job_url, pct FROM matches WHERE tg_id=1"))
+        assert after == {"sp-remote": 0, "sp-sf": 0}
+    finally:
+        conn.execute("DELETE FROM matches WHERE tg_id=1")
+        conn.execute("DELETE FROM jobs WHERE url LIKE 'sp-%'")
+        conn.commit()
+        conn.close()
+
+
+def test_score_batch_truncates_long_why(monkeypatch):
+    """Модель может не уложиться в лимит — обрезаем на своей стороне."""
+    import llm
+    monkeypatch.setattr(llm, "ask_json", lambda *a, **k: {"scores": [
+        {"url": "u1", "pct": 50, "why": "я" * 900, "where": "П" * 200}]})
+    (_, _, why), = bot.score_batch({"role": "backend"}, SCORE_ROWS)
+    head, where = why.split("\n")
+    assert len(head) == bot.WHY_CHARS
+    assert len(where) == bot.WHERE_CHARS
+
+
+def test_score_prompt_asks_stack_inside_why():
+    """Отдельного поля stack нет: технологии называются внутри why."""
+    assert '"stack"' not in bot.SCORE_SYSTEM
+    assert "технологии из обязательных требований" in bot.SCORE_SYSTEM
+
+
+def test_rescore_spares_what_was_already_sent():
+    """Отправленное человек видел — второй раз не придёт, переоценивать нечего.
+    Остальное снимаем и помечаем как доборку истории."""
+    import storage
+    conn = storage.connect()
+    conn.execute("INSERT OR REPLACE INTO profiles(tg_id,data,updated_at) "
+                 "VALUES(7,'{}','2026-10-06')")
+    for url in ("https://j/sent", "https://j/fresh"):
+        conn.execute("INSERT OR REPLACE INTO jobs(url,company,title,source,first_seen,dedup) "
+                     "VALUES(?,'Acme','Backend','lever','2026-10-01',?)", (url, url))
+        conn.execute("INSERT OR REPLACE INTO matches(tg_id,job_url,pct,why,scored_at) "
+                     "VALUES(7,?,80,'старая оценка','2026-10-01')", (url,))
+    conn.execute("INSERT OR REPLACE INTO sent(tg_id,job_url,sent_at,dedup) "
+                 "VALUES(7,'https://j/sent','2026-10-02','https://j/sent')")
+    conn.commit()
+    bot.SCORE_WAKE.clear()
+    bot.rescore(conn, 7)
+    left = {u for (u,) in conn.execute("SELECT job_url FROM matches WHERE tg_id=7")}
+    assert left == {"https://j/sent"}
+    assert conn.execute("SELECT 1 FROM meta WHERE key=?",
+                        (bot.backlog_key(7),)).fetchone()        # доборка назначена
+    assert bot.SCORE_WAKE.is_set()             # ждать таймера не из чего
+
+
+def test_backlog_pass_pays_only_for_the_top(monkeypatch):
+    """Верхушка идёт к дорогой модели, остальным сразу ноль с баллом триажа —
+    иначе обычный цикл подберёт их как неоценённые и заплатит за каждую."""
+    import storage, llm
+    monkeypatch.setattr(bot, "RESCORE_TOP", 2)
+    conn = storage.connect()
+    conn.execute("INSERT OR REPLACE INTO profiles(tg_id,data,updated_at) VALUES"
+                 "(8,'{\"level\":\"senior\",\"relocation\":\"да\"}','2026-10-06')")
+    for i, title in enumerate(("Senior Go Engineer", "Senior Python Engineer",
+                               "Senior Java Engineer", "Senior Ruby Engineer")):
+        conn.execute("INSERT OR REPLACE INTO jobs(url,company,title,location,source,"
+                     "first_seen,dedup,description) VALUES(?,'Acme',?,'Porto','lever',"
+                     "'2026-10-01',?,'текст')", (f"https://j/{i}", title, f"d{i}"))
+    conn.commit()
+    monkeypatch.setattr(llm, "ask_json", lambda *a, **k: {"scores": [
+        {"url": "https://j/0", "pct": 90}, {"url": "https://j/1", "pct": 70},
+        {"url": "https://j/2", "pct": 40}, {"url": "https://j/3", "pct": 10}]})
+    known = bot.backlog_pass(conn, 8)
+    assert known == {"https://j/0": 90, "https://j/1": 70}
+    # в базе лежат и чужие вакансии от соседних тестов — смотрим только свои
+    got = dict(conn.execute("SELECT job_url, pct FROM matches WHERE tg_id=8 "
+                            "AND job_url IN ('https://j/0','https://j/1',"
+                            "'https://j/2','https://j/3')"))
+    assert got == {"https://j/2": 0, "https://j/3": 0}    # верхушка пока без оценки
+    assert conn.execute("SELECT triage_pct FROM matches WHERE job_url='https://j/2'"
+                        ).fetchone()[0] == 40
+
+
+def test_score_pending_trusts_backlog_scores(monkeypatch):
+    """Верхушка доборки не проходит триаж второй раз: лишняя пачка плюс риск,
+    что модель отсеет то, что сама же отобрала."""
+    import storage, llm
+    conn = storage.connect()
+    conn.execute("INSERT OR REPLACE INTO profiles(tg_id,data,updated_at) VALUES"
+                 "(11,'{\"level\":\"senior\",\"relocation\":\"да\"}','2026-10-06')")
+    conn.execute("INSERT OR REPLACE INTO jobs(url,company,title,location,source,"
+                 "first_seen,dedup,description) VALUES('https://k/1','Acme',"
+                 "'Senior Go Engineer','Porto','lever','2026-10-01','k1','текст')")
+    # соседние тесты пишут в ту же базу: закрываем им очередь, чтобы остаться
+    # с одной вакансией и видеть ровно те вызовы, которые делает доборка
+    conn.execute("INSERT OR REPLACE INTO matches(tg_id,job_url,pct,why,scored_at) "
+                 "SELECT 11, url, 0, 'чужая', '2026-10-06' FROM jobs "
+                 "WHERE url != 'https://k/1'")
+    conn.commit()
+    seen = []
+
+    def fake_ask(system, user, **kw):
+        seen.append("триаж" if system is bot.TRIAGE_SYSTEM else "sonnet")
+        return {"scores": [{"url": "https://k/1", "pct": 91, "why": "подходит"}]}
+
+    monkeypatch.setattr(llm, "ask_json", fake_ask)
+    monkeypatch.setattr(bot, "SCORE_SLICE", 50)
+    bot.score_pending(conn, 11, known_triage={"https://k/1": 85})
+    assert seen == ["sonnet"]                  # дешёвую модель не звали вовсе
+    row = conn.execute("SELECT pct, triage_pct FROM matches "
+                       "WHERE job_url='https://k/1'").fetchone()
+    assert row == (91, 85)
+
+
+def test_score_pending_stores_triage_score_for_both_sides(monkeypatch):
+    """Балл дешёвой модели нужен и у прошедших: без пары «триаж, Sonnet»
+    порог для переоценки истории не на чем калибровать."""
+    import storage, llm
+    conn = storage.connect()
+    conn.execute("INSERT OR REPLACE INTO profiles(tg_id,data,updated_at) "
+                 "VALUES(9,'{\"level\":\"senior\",\"relocation\":\"да\"}','2026-10-06')")
+    for url, title in (("https://j/keep", "Senior Backend Engineer"),
+                       ("https://j/drop", "Retail Account Manager")):
+        conn.execute("INSERT OR REPLACE INTO jobs(url,company,title,location,source,"
+                     "first_seen,dedup,description) VALUES(?,'Acme',?,'Porto','lever',"
+                     "'2026-10-01',?,'Python, Kafka')", (url, title, url))
+    conn.commit()
+
+    def fake_ask(system, user, **kw):
+        if system is bot.TRIAGE_SYSTEM:
+            return {"scores": [{"url": "https://j/keep", "pct": 62},
+                               {"url": "https://j/drop", "pct": 5}]}
+        return {"scores": [{"url": "https://j/keep", "pct": 88, "why": "подходит"}]}
+
+    monkeypatch.setattr(llm, "ask_json", fake_ask)
+    bot.score_pending(conn, 9)
+    got = dict(conn.execute("SELECT job_url, triage_pct FROM matches WHERE tg_id=9"))
+    assert got == {"https://j/keep": 62, "https://j/drop": 5}
+    assert conn.execute("SELECT pct FROM matches WHERE job_url='https://j/keep'"
+                        ).fetchone()[0] == 88

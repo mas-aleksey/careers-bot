@@ -58,6 +58,9 @@ LATE_COLUMNS = [
     # одна вакансия лежит на доске отдельной строкой под каждую страну: у Mozilla
     # «Senior Software Engineer, Add-Ons» — десять url. Ключ схлопывает их в одну
     ("jobs", "dedup TEXT"), ("sent", "dedup TEXT"),
+    # балл дешёвой модели: у отсеянных он был виден только в тексте причины, у
+    # прошедших терялся совсем — а без пары «триаж, Sonnet» порог не откалибровать
+    ("matches", "triage_pct INTEGER"),
 ]
 INDEXES = [
     "CREATE INDEX IF NOT EXISTS jobs_dedup ON jobs(dedup)",

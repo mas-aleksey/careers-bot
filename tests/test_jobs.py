@@ -516,12 +516,12 @@ def test_peopleforce_reads_shared_domain_layout(monkeypatch):
     assert seen[0] == "https://www.careers-page.com/hivexteam?page=1"
 
 
-def test_triage_prompt_allows_bare_remote():
-    """Голый Remote без страны триаж принимал за региональную удалёнку и резал:
-    так потерялись Staff Product Engineer у Mozilla и 71 вакансия BNP."""
+def test_triage_no_longer_judges_geography():
+    """Географию решают ворота: три дешёвые модели путались в строках вида
+    «Remote: Portugal, Poland, Spain» и теряли до половины подходящего."""
     import bot
-    assert "Голый «Remote»" in bot.TRIAGE_SYSTEM
-    assert "Пустая локация" in bot.TRIAGE_SYSTEM
+    assert "Географию не оценивай" in bot.TRIAGE_SYSTEM
+    assert "локацию игнорируй" in bot.TRIAGE_SYSTEM
 
 
 def test_wordpress_keeps_description(monkeypatch):
