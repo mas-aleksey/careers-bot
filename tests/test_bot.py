@@ -423,3 +423,51 @@ def test_deliver_commits_before_the_next_send(monkeypatch):
     monkeypatch.setattr(bot.time, "sleep", lambda s: None)
     assert bot.deliver(conn) == 2
     assert in_txn == [False, False]            # обе отправки вне транзакции
+
+
+def test_inherit_scores_reuses_the_verdict_for_a_new_url(monkeypatch):
+    """Clera перевыпускает id в Ashby: та же вакансия возвращается под новым
+    адресом. Платить за неё второй раз незачем — берём прежнюю оценку."""
+    import storage, llm
+    conn = storage.connect()
+    conn.execute("INSERT OR REPLACE INTO profiles(tg_id,data,updated_at) VALUES"
+                 "(31,'{\"level\":\"senior\",\"relocation\":\"да\"}','2026-10-07')")
+    conn.execute("INSERT OR REPLACE INTO jobs(url,company,title,location,source,"
+                 "first_seen,dedup,closed_at) VALUES('https://a/old','Clera',"
+                 "'Founding Engineer','Remote','ashby','2026-10-01','clera|fe','2026-10-07')")
+    conn.execute("INSERT OR REPLACE INTO matches(tg_id,job_url,pct,why,scored_at,triage_pct) "
+                 "VALUES(31,'https://a/old',77,'подходит','2026-10-01',60)")
+    conn.execute("INSERT OR REPLACE INTO jobs(url,company,title,location,source,"
+                 "first_seen,dedup) VALUES('https://a/new','Clera','Founding Engineer',"
+                 "'Remote','ashby','2026-10-07','clera|fe')")
+    conn.commit()
+    called = []
+    monkeypatch.setattr(llm, "ask_json", lambda *a, **k: called.append(1) or {"scores": []})
+    assert bot.inherit_scores(conn, 31, {"level": "senior", "relocation": "да"}) == 1
+    assert conn.execute("SELECT pct, why FROM matches WHERE tg_id=31 AND "
+                        "job_url='https://a/new'").fetchone() == (77, "подходит")
+    assert called == []                        # к модели не ходили
+
+
+def test_health_counts_vacancies_not_rows():
+    """Одна вакансия лежит на доске под несколькими адресами, а Ashby у Clera
+    ещё и перевыпускает id. По строкам отчёт завышал и приход, и уход."""
+    import storage
+    conn = storage.connect()
+    conn.execute("DELETE FROM jobs")
+    conn.execute("DELETE FROM companies")
+    # одна вакансия двумя строками — приход считается один раз
+    for u in ("https://h/1", "https://h/2"):
+        conn.execute("INSERT INTO jobs(url,company,title,source,first_seen,dedup) "
+                     "VALUES(?,'Acme','Backend','ashby',datetime('now'),'acme|backend')", (u,))
+    # id перевыпустили: старая строка закрыта, живая копия осталась
+    conn.execute("INSERT INTO jobs(url,company,title,source,first_seen,dedup,closed_at) "
+                 "VALUES('https://h/old','Acme','Backend','ashby',datetime('now'),"
+                 "'acme|backend',datetime('now'))")
+    # а эта ушла с доски совсем
+    conn.execute("INSERT INTO jobs(url,company,title,source,first_seen,dedup,closed_at) "
+                 "VALUES('https://h/gone','Acme','Designer','ashby',datetime('now'),"
+                 "'acme|designer',datetime('now'))")
+    conn.commit()
+    text = bot.health_report(conn)
+    assert "+2 вакансий · закрылось 1" in text

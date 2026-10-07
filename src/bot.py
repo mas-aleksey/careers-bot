@@ -498,6 +498,33 @@ def backlog_pass(conn, tg_id):
     return {u: scores.get(u, 0) for u in top}
 
 
+def inherit_scores(conn, tg_id, profile):
+    """Вакансия вернулась на доску под новым адресом — оценка у неё уже есть.
+
+    Ashby у Clera перевыпускает id: та же «Founding Engineer» уходит закрытой и
+    тут же заводится заново. Без этого обычный цикл видит её как неоценённую и
+    платит за неё второй раз — на сегодняшней базе так оплачено около 400 групп
+    дублей на каждый профиль.
+
+    Балл берём наибольший в группе, вместе с его обоснованием: в одной группе
+    лежат и удалённая вакансия, и офисная, и гейт в spread разложит их по
+    строкам сам."""
+    rows = conn.execute("""
+        SELECT min(j.url), max(m.pct), m.why FROM jobs j
+        JOIN jobs j2 ON j2.dedup = j.dedup
+        JOIN matches m ON m.job_url = j2.url AND m.tg_id = ?
+        WHERE j.closed_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM matches mm
+                          WHERE mm.tg_id = ? AND mm.job_url = j.url)
+        GROUP BY j.dedup""", (tg_id, tg_id)).fetchall()
+    for url, pct, why in rows:
+        spread(conn, tg_id, url, pct, why, profile=profile)
+    if rows:
+        conn.commit()
+        log("inherit", tg_id, f"оценка перенесена на {len(rows)}")
+    return len(rows)
+
+
 def score_pending(conn, tg_id, limit=SCORE_SLICE, known_triage=None):
     """Оценивает то, что для этого профиля ещё не оценено. Закрытые пропускаем:
     платить за оценку снятой вакансии незачем.
@@ -508,6 +535,8 @@ def score_pending(conn, tg_id, limit=SCORE_SLICE, known_triage=None):
     profile = get_profile(conn, tg_id)
     if not profile:
         return 0
+    # Вернувшиеся под новым адресом забирают прежнюю оценку, не доходя до модели.
+    inherit_scores(conn, tg_id, profile)
     # По одной вакансии из группы дублей: у Mozilla десять url на одну должность,
     # платить за неё десять раз незачем. Результат раскладывается на всю группу.
     rows = conn.execute("""
@@ -1115,8 +1144,18 @@ def health_report(conn):
         SELECT name FROM companies
         WHERE ats IS NOT NULL AND last_error IS NULL AND COALESCE(last_count, 0) = 0
         ORDER BY name""").fetchall()
-    day = conn.execute("SELECT COUNT(*) FROM jobs WHERE first_seen > datetime('now','-1 day')").fetchone()[0]
-    closed = conn.execute("SELECT COUNT(*) FROM jobs WHERE closed_at > datetime('now','-1 day')").fetchone()[0]
+    # Считаем вакансии, а не строки. Одна вакансия лежит на доске под несколькими
+    # адресами, а Ashby у Clera ещё и перевыпускает id: та же «Founding Engineer»
+    # уходит закрытой и заводится заново. По строкам выходило +363/-334 в сутки
+    # при настоящих +321/-238.
+    day = conn.execute("SELECT COUNT(DISTINCT dedup) FROM jobs "
+                       "WHERE first_seen > datetime('now','-1 day')").fetchone()[0]
+    # Закрытой считаем ту, у которой не осталось ни одной живой копии.
+    closed = conn.execute("""
+        SELECT COUNT(DISTINCT o.dedup) FROM jobs o
+        WHERE o.closed_at > datetime('now','-1 day')
+          AND NOT EXISTS (SELECT 1 FROM jobs n
+                          WHERE n.dedup = o.dedup AND n.closed_at IS NULL)""").fetchone()[0]
     total = conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0]
     lines = [f"<b>Источники за сутки</b>",
              f"{total} компаний · +{day} вакансий · закрылось {closed}"]

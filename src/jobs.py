@@ -591,6 +591,33 @@ PF_JOB = re.compile(r'<a class="stretched-link[^"]*"[^>]*href="(?P<href>/v/[^"]+
                     r'(?P<title>[^<]{3,100})</a>')
 
 
+# У Авиасейлс в карточке сначала отдел, потом должность, и общий linked_jobs
+# берёт за название первое — в базу уезжало «Ticket» вместо «Team Lead».
+# Разворачивать общее правило нельзя: у Findev и RED Global порядок обратный.
+# Имена классов тут от CSS-модулей, хвост после дефиса меняется при пересборке
+# сайта — цепляемся за стабильную часть, «team-» и «title-».
+AVIASALES_CARD = re.compile(
+    r'href="(?P<href>/about/vacancies/\d+)"'
+    r'(?:(?!</a>)[\s\S])*?class="[^"]*\btitle-[^"]*"[^>]*>(?P<title>[^<]{3,80})<')
+
+
+def aviasales(s):
+    """Карточки на своей странице: отдел и должность отдельными блоками.
+    Локации в списке нет вовсе — она в тексте вакансии, его дочитает page_text."""
+    html = get(s, want_json=False)
+    if not html:
+        return None
+    root = re.match(r"https?://[^/]+", s)
+    out, seen = [], set()
+    for m in AVIASALES_CARD.finditer(html):
+        full = root.group(0) + m.group("href")
+        if full in seen:
+            continue
+        seen.add(full)
+        out.append((full, html_mod.unescape(m.group("title")).strip(), "", None))
+    return page_text(out, s) if out else None
+
+
 def peopleforce(s):
     """PeopleForce под своим доменом: careers.taxdome.com. Вакансии в вёрстке,
     по десять на страницу, локации на списке нет — только отдел."""
@@ -633,7 +660,8 @@ ADAPTERS = {"ashby": ashby, "greenhouse": greenhouse, "lever": lever,
             "aristek": aristek,
             "atlassian": atlassian,
             "epam": epam,
-            "peopleforce": peopleforce}
+            "peopleforce": peopleforce,
+            "aviasales": aviasales}
 
 
 def discover(name, url):

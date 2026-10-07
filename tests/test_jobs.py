@@ -710,3 +710,26 @@ def test_run_diagnoses_outside_the_transaction(monkeypatch, tmp_path):
     assert in_txn == [False]                   # сеть вне транзакции
     assert conn.execute("SELECT last_error FROM companies WHERE name='Няма'"
                         ).fetchone()[0] == "HTTP 404"
+
+
+AVIA_HTML = (
+    '<a class="card-HUSXor" data-id="4343726" href="/about/vacancies/4343726">'
+    '<div class="header-N9FCCf"><img src="x.png"/>'
+    '<div class="body-2-regular-zrjCZc team-pazXxA">Support: Monitoring</div></div>'
+    '<div class="position-qdyp96"><svg><path d="M15"/></svg>'
+    '<div class="bold-TA4Om3 title-KOQ0n_">Monitoring Specialist</div></div></a>'
+    '<a class="card-HUSXor" href="/about/vacancies/4197840">'
+    '<div class="team-pazXxA">Maintenance</div>'
+    '<div class="title-KOQ0n_">System Administrator</div></a>'
+)
+
+
+def test_aviasales_takes_the_title_not_the_team(monkeypatch):
+    """В карточке сначала отдел, потом должность: общий linked_jobs брал первое
+    и писал в базу «Ticket» вместо «Team Lead»."""
+    monkeypatch.setattr(jobs, "get", lambda url, **kw: AVIA_HTML if "vacancies" == url.rsplit("/", 1)[-1] else None)
+    rows = jobs.aviasales("https://www.aviasales.ru/about/vacancies")
+    assert [(r[0], r[1]) for r in rows] == [
+        ("https://www.aviasales.ru/about/vacancies/4343726", "Monitoring Specialist"),
+        ("https://www.aviasales.ru/about/vacancies/4197840", "System Administrator")]
+    assert jobs.ADAPTERS["aviasales"] is jobs.aviasales
