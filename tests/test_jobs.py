@@ -179,7 +179,7 @@ def test_fresh_company_is_skipped_but_stale_one_is_not(monkeypatch):
     hit = []
     monkeypatch.setitem(jobs.ADAPTERS, "lever",
                         lambda s: hit.append(s) or [(f"u/{s}", "Backend", "Remote", None)])
-    new, changed, stats, skipped = jobs.run()
+    new, changed, stats, skipped, _ = jobs.run()
 
     assert "stale" in hit and "fresh" not in hit, hit
     assert skipped >= 1
@@ -733,3 +733,24 @@ def test_aviasales_takes_the_title_not_the_team(monkeypatch):
         ("https://www.aviasales.ru/about/vacancies/4343726", "Monitoring Specialist"),
         ("https://www.aviasales.ru/about/vacancies/4197840", "System Administrator")]
     assert jobs.ADAPTERS["aviasales"] is jobs.aviasales
+
+
+def test_closed_job_reopens_when_it_is_back_on_the_board(monkeypatch):
+    """Разовый сбой выдачи закрывал вакансию навсегда: INSERT OR IGNORE молча
+    пропускает известный url, и closed_at уже никто не снимал."""
+    import storage
+    conn = storage.connect()
+    conn.execute("INSERT OR REPLACE INTO companies(name,page_url,ats,slug) "
+                 "VALUES('Вернулась','https://back.test','lever','back')")
+    conn.execute("INSERT OR REPLACE INTO jobs(url,company,title,source,first_seen,closed_at) "
+                 "VALUES('https://back.test/j1','Вернулась','Backend','lever',"
+                 "'2026-10-01','2026-10-05')")
+    conn.commit()
+    monkeypatch.setattr(jobs, "db", lambda: conn)
+    monkeypatch.setitem(jobs.ADAPTERS, "lever",
+                        lambda s: [("https://back.test/j1", "Backend", "Porto", None)])
+    new, _, _, _, reopened = jobs.run(only="Вернулась")
+    assert reopened == 1
+    assert conn.execute("SELECT closed_at FROM jobs WHERE url='https://back.test/j1'"
+                        ).fetchone()[0] is None
+    assert new == []                           # не новая: человек её уже видел

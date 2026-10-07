@@ -1034,6 +1034,7 @@ def run(only=None):
         results = list(ex.map(lambda c: collect(c[0], c[1], cache), companies))
 
     new, changed, stats, closed, to_diagnose = [], [], [], [], []
+    reopened = 0
     for (name, url), (_, ats, slug, jobs, phash) in zip(companies, results):
         # added_by/added_at только при вставке: обход не должен переписывать,
         # кто завёл компанию. DO UPDATE их намеренно не трогает.
@@ -1094,6 +1095,15 @@ def run(only=None):
                              (desc, j_url))
             if not cur.rowcount and pub:      # вакансия известна, дату узнали позже
                 conn.execute("UPDATE jobs SET posted=? WHERE url=? AND posted IS NULL", (pub, j_url))
+            if not cur.rowcount:
+                # Вернулась на доску под тем же адресом. Такое бывает после
+                # разового сбоя выдачи: один проход не показал вакансию, мы её
+                # закрыли, а она никуда не девалась. Без этого строка оставалась
+                # закрытой навсегда — INSERT OR IGNORE её молча пропускает.
+                # Новой не считаем: человек её уже видел, оценка в matches есть.
+                reopened += conn.execute(
+                    "UPDATE jobs SET closed_at=NULL WHERE url=? AND closed_at IS NOT NULL",
+                    (j_url,)).rowcount
             if cur.rowcount:
                 fresh += 1
                 new.append((name, title, f"{loc} · опубликована {pub}" if pub else loc, j_url))
@@ -1116,13 +1126,14 @@ def run(only=None):
         why = diagnose(ats, slug, url)
         conn.execute("UPDATE companies SET last_error=? WHERE name=?", (why, name))
         conn.commit()
-    return new, changed, stats, skipped
+    return new, changed, stats, skipped, reopened
 
 
 if __name__ == "__main__":
-    new, changed, stats, skipped = run(sys.argv[1] if len(sys.argv) > 1 else None)
+    new, changed, stats, skipped, reopened = run(sys.argv[1] if len(sys.argv) > 1 else None)
     for name, ats, fresh in sorted(stats, key=lambda x: -x[2])[:15]:
         print(f"{fresh:4}  {name:24} {ats}")
     shut = db().execute("select count(*) from jobs where closed_at is not null").fetchone()[0]
     print(f"\nновых вакансий {len(new)}, страниц изменилось {len(changed)}, "
-          f"компаний {len(stats)}, пропущено свежих {skipped}, закрытых всего {shut}")
+          f"компаний {len(stats)}, пропущено свежих {skipped}, "
+          f"вернулось {reopened}, закрытых всего {shut}")
