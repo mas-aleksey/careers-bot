@@ -742,9 +742,13 @@ def deliver(conn):
                 conn.execute("INSERT INTO sent(tg_id,job_url,sent_at,dedup) VALUES(?,?,?,"
                              "(SELECT dedup FROM jobs WHERE url=?))", (tg_id, url, now(), url))
                 conn.execute("UPDATE users SET last_notified=? WHERE tg_id=?", (now(), tg_id))
+                # Коммит до следующей отправки. С коммитом в конце цикла запись
+                # держала бы базу всю рассылку: двадцать карточек на человека,
+                # у каждой запрос к телеграму и пауза, — это полминуты на двоих
+                # и полчаса на сотне.
+                conn.commit()
                 count += 1
                 time.sleep(0.4)
-    conn.commit()
     return count
 
 
@@ -1070,6 +1074,7 @@ def setup_commands(conn):
 
 
 COLLECT_EVERY = 4 * 3600
+RETRY_AFTER_FAIL = 600  # сборщик упал, не дойдя до записи: пауза перед повтором
 COLLECTOR = str(Path(__file__).with_name("jobs.py"))
 
 
@@ -1079,32 +1084,24 @@ SCORE_EVERY = 900
 SCORE_WAKE = threading.Event()
 
 
-def scorer_loop():
-    """Оценка новых вакансий под каждый профиль. Отдельный поток: при пустой
-    очереди не стоит ничего.
-
-    Порция ограничена: с текстом вакансии пачка из шести весит около 5.5 тысяч
-    токенов, и накопившаяся за большой сбор тысяча вакансий за один проход
-    обошлась бы в несколько долларов. SCORE_SLICE за цикл в 15 минут — это
-    больше 11 тысяч вакансий в сутки, то есть с запасом к потоку в сотню."""
-    while True:
-        SCORE_WAKE.wait(SCORE_EVERY)
-        SCORE_WAKE.clear()
-        try:
-            conn = db()
-            for (tg_id,) in conn.execute("SELECT tg_id FROM profiles").fetchall():
-                known = None
-                # Доборка истории идёт первой и ровно один раз на смену профиля:
-                # флаг снимаем сразу, чтобы сбой дорогой модели её не повторил.
-                if conn.execute("SELECT 1 FROM meta WHERE key=?",
-                                (backlog_key(tg_id),)).fetchone():
-                    conn.execute("DELETE FROM meta WHERE key=?", (backlog_key(tg_id),))
-                    conn.commit()
-                    known = backlog_pass(conn, tg_id)
-                score_pending(conn, tg_id, known_triage=known)
-            conn.close()
-        except Exception as e:
-            log("scorer-error", repr(e))
+def score_once():
+    """Один проход оценки по всем профилям. Доборка истории идёт первой и ровно
+    один раз на смену профиля: флаг снимаем сразу, чтобы сбой дорогой модели
+    её не повторил."""
+    conn = db()
+    try:
+        for (tg_id,) in conn.execute("SELECT tg_id FROM profiles").fetchall():
+            known = None
+            if conn.execute("SELECT 1 FROM meta WHERE key=?",
+                            (backlog_key(tg_id),)).fetchone():
+                conn.execute("DELETE FROM meta WHERE key=?", (backlog_key(tg_id),))
+                conn.commit()
+                known = backlog_pass(conn, tg_id)
+            score_pending(conn, tg_id, known_triage=known)
+    except Exception as e:
+        log("scorer-error", repr(e))
+    finally:
+        conn.close()
 
 
 def health_report(conn):
@@ -1149,19 +1146,56 @@ def daily_health(conn):
         conn.commit()
 
 
-def collector_loop():
-    """Сборщик вакансий крутится здесь же: отдельный планировщик ради одной
-    команды дважды в сутки не нужен, а контейнер и так перезапускается сам."""
+def collect_due_in(conn):
+    """Сколько секунд до следующего обхода. Отсчёт от последней проверки, а не
+    от старта процесса: иначе каждая пересборка образа сдвигает расписание, и
+    после рестарта вскоре после обхода следующий приходит через восемь часов.
+
+    Отдельного поля не нужно — companies.checked_at обновляется только у
+    реально проверенных, и прогон, пропустивший всех как свежих, его не двигает."""
+    row = conn.execute("SELECT max(checked_at) FROM companies").fetchone()
+    if not row or not row[0]:
+        return 0                      # пустой реестр — идём сразу
+    try:
+        last = datetime.fromisoformat(row[0])
+    except ValueError:
+        return 0
+    passed = (datetime.now(timezone.utc) - last).total_seconds()
+    return max(0, COLLECT_EVERY - passed)
+
+
+def collect_once():
+    """Обход доской. Отдельным процессом: падение сборщика не должно уносить
+    бота, а его память освобождается вместе с процессом."""
+    try:
+        r = subprocess.run([sys.executable, COLLECTOR], capture_output=True,
+                           text=True, timeout=3600)
+        tail = (r.stdout or r.stderr).strip().split("\n")[-1][:200]
+        log("collect", r.returncode, tail)
+    except Exception as e:
+        log("collect-error", repr(e))
+
+
+def worker_loop():
+    """Обход и оценка по очереди, в одном потоке: оба пишут в одну базу, и
+    делать это одновременно незачем. Телеграм остаётся в главном потоке и
+    отвечает на команды, пока здесь идёт работа."""
     while True:
-        try:
-            r = subprocess.run([sys.executable, COLLECTOR], capture_output=True,
-                               text=True, timeout=3600)
-            tail = (r.stdout or r.stderr).strip().split("\n")[-1][:200]
-            log("collect", r.returncode, tail)
-            SCORE_WAKE.set()      # будим, когда сборщик уже отпустил базу
-        except Exception as e:
-            log("collect-error", repr(e))
-        time.sleep(COLLECT_EVERY)
+        conn = db()
+        due = collect_due_in(conn) <= 0
+        conn.close()
+        if due and Path(COLLECTOR).exists():
+            collect_once()
+        score_once()
+        conn = db()
+        wait = collect_due_in(conn)
+        conn.close()
+        # Упавший сборщик не двигает checked_at, срок остаётся просроченным:
+        # без паузы цикл дёргал бы доски без остановки.
+        if due and wait <= 0:
+            wait = RETRY_AFTER_FAIL
+        SCORE_WAKE.wait(min(SCORE_EVERY, wait or SCORE_EVERY))
+        SCORE_WAKE.clear()
 
 
 def main():
@@ -1172,9 +1206,7 @@ def main():
     offset = int(row[0]) if row else 0
     log("start")
     setup_commands(conn)
-    if Path(COLLECTOR).exists():
-        threading.Thread(target=collector_loop, daemon=True).start()
-    threading.Thread(target=scorer_loop, daemon=True).start()
+    threading.Thread(target=worker_loop, daemon=True).start()
     last_deliver = 0.0
     while True:
         ups = call("getUpdates", offset=offset, timeout=50) or []

@@ -376,3 +376,50 @@ def test_score_pending_stores_triage_score_for_both_sides(monkeypatch):
     assert got == {"https://j/keep": 62, "https://j/drop": 5}
     assert conn.execute("SELECT pct FROM matches WHERE job_url='https://j/keep'"
                         ).fetchone()[0] == 88
+
+
+def test_collect_due_counts_from_last_check_not_from_start():
+    """Расписание обхода переживает пересборку образа: отсчёт от последней
+    проверки компаний, а не от старта процесса."""
+    import storage
+    from datetime import datetime, timedelta, timezone
+    conn = storage.connect()
+    conn.execute("DELETE FROM companies")
+    assert bot.collect_due_in(conn) == 0          # пустой реестр — идём сразу
+
+    def put(hours_ago):
+        when = (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
+        conn.execute("INSERT OR REPLACE INTO companies(name,page_url,checked_at) "
+                     "VALUES('Acme','https://acme.test',?)", (when,))
+        conn.commit()
+
+    put(1)                                        # час назад — ждём около трёх
+    assert 2.9 * 3600 < bot.collect_due_in(conn) <= 3 * 3600
+    put(5)                                        # просрочено — идём сразу
+    assert bot.collect_due_in(conn) == 0
+    conn.execute("UPDATE companies SET checked_at='не дата'")
+    conn.commit()
+    assert bot.collect_due_in(conn) == 0           # мусор в поле не вешает цикл
+
+
+def test_deliver_commits_before_the_next_send(monkeypatch):
+    """Сеть внутри открытой транзакции держит базу: коммит до следующей
+    отправки, а не один в конце рассылки."""
+    import storage
+    conn = storage.connect()
+    conn.execute("INSERT OR REPLACE INTO users(tg_id,paused) VALUES(21,0)")
+    conn.execute("INSERT OR REPLACE INTO profiles(tg_id,data,min_match,notify,updated_at) "
+                 "VALUES(21,'{}',70,'instant','2026-10-06')")
+    for i in (1, 2):
+        conn.execute("INSERT OR REPLACE INTO jobs(url,company,title,source,first_seen,dedup) "
+                     "VALUES(?,'Acme','Backend','lever','2026-10-01',?)",
+                     (f"https://d/{i}", f"dd{i}"))
+        conn.execute("INSERT OR REPLACE INTO matches(tg_id,job_url,pct,why,scored_at) "
+                     "VALUES(21,?,90,'подходит','2026-10-06')", (f"https://d/{i}",))
+    conn.commit()
+    in_txn = []
+    monkeypatch.setattr(bot, "send",
+                        lambda *a, **k: in_txn.append(conn.in_transaction) or True)
+    monkeypatch.setattr(bot.time, "sleep", lambda s: None)
+    assert bot.deliver(conn) == 2
+    assert in_txn == [False, False]            # обе отправки вне транзакции

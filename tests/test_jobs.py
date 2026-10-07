@@ -691,3 +691,22 @@ def test_dover_job_takes_card_from_api(monkeypatch):
     assert where == "Remote: Europe"           # повтор локации схлопнут
     assert text == "Who You Are Senior Backend"
     assert jobs.dover_job("https://acme.test/jobs/1") == (None, None)
+
+
+def test_run_diagnoses_outside_the_transaction(monkeypatch, tmp_path):
+    """diagnose ходит в сеть: внутри открытой транзакции он держал бы запись
+    до 15 секунд на каждую молчащую доску."""
+    import storage
+    conn = storage.connect()
+    conn.execute("INSERT OR REPLACE INTO companies(name,page_url,ats,slug) "
+                 "VALUES('Няма','https://nyama.test','lever','nyama')")
+    conn.commit()
+    in_txn = []
+    monkeypatch.setattr(jobs, "db", lambda: conn)
+    monkeypatch.setitem(jobs.ADAPTERS, "lever", lambda s: None)
+    monkeypatch.setattr(jobs, "diagnose",
+                        lambda *a: in_txn.append(conn.in_transaction) or "HTTP 404")
+    jobs.run(only="Няма")
+    assert in_txn == [False]                   # сеть вне транзакции
+    assert conn.execute("SELECT last_error FROM companies WHERE name='Няма'"
+                        ).fetchone()[0] == "HTTP 404"

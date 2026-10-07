@@ -1005,7 +1005,7 @@ def run(only=None):
     with ThreadPoolExecutor(max_workers=5) as ex:
         results = list(ex.map(lambda c: collect(c[0], c[1], cache), companies))
 
-    new, changed, stats, closed = [], [], [], []
+    new, changed, stats, closed, to_diagnose = [], [], [], [], []
     for (name, url), (_, ats, slug, jobs, phash) in zip(companies, results):
         # added_by/added_at только при вставке: обход не должен переписывать,
         # кто завёл компанию. DO UPDATE их намеренно не трогает.
@@ -1018,8 +1018,13 @@ def run(only=None):
                 conn.execute("UPDATE companies SET last_ok=?, last_count=?, last_error=NULL "
                              "WHERE name=?", (now, len(jobs), name))
             else:
-                why = ("доска вернула пустой список" if jobs == []
-                       else diagnose(ats, slug, url))
+                # diagnose ходит в сеть, и внутри открытой транзакции это держало
+                # бы блокировку записи до 15 секунд на каждую молчащую доску.
+                # Откладываем на после коммита, сюда пишем только счётчик.
+                if jobs == []:
+                    why = "доска вернула пустой список"
+                else:
+                    why, to_diagnose = None, to_diagnose + [(name, ats, slug, url)]
                 conn.execute("UPDATE companies SET last_count=?, last_error=? WHERE name=?",
                              (0, why, name))
         if ats is None:
@@ -1077,6 +1082,12 @@ def run(only=None):
         stats.append((name, ats, fresh))
 
     conn.commit()
+    # Причины отказов — после коммита: сеть и открытая транзакция не совмещаются.
+    # Каждая запись своей короткой транзакцией, между ними база свободна.
+    for name, ats, slug, url in to_diagnose:
+        why = diagnose(ats, slug, url)
+        conn.execute("UPDATE companies SET last_error=? WHERE name=?", (why, name))
+        conn.commit()
     return new, changed, stats, skipped
 
 
