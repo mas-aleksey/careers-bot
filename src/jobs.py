@@ -1130,8 +1130,8 @@ def run(only=None):
                 # закрытой навсегда — INSERT OR IGNORE её молча пропускает.
                 # Новой не считаем: человек её уже видел, оценка в matches есть.
                 reopened += conn.execute(
-                    "UPDATE jobs SET closed_at=NULL WHERE url=? AND closed_at IS NOT NULL",
-                    (j_url,)).rowcount
+                    "UPDATE jobs SET closed_at=NULL, reopened_at=? "
+                    "WHERE url=? AND closed_at IS NOT NULL", (now, j_url)).rowcount
             if cur.rowcount:
                 fresh += 1
                 new.append((name, title, f"{loc} · опубликована {pub}" if pub else loc, j_url))

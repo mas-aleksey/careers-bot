@@ -469,5 +469,18 @@ def test_health_counts_vacancies_not_rows():
                  "VALUES('https://h/gone','Acme','Designer','ashby',datetime('now'),"
                  "'acme|designer',datetime('now'))")
     conn.commit()
+    # id перевыпустили у вакансии, которая была известна и раньше: не новая
+    conn.execute("INSERT INTO jobs(url,company,title,source,first_seen,dedup,closed_at) "
+                 "VALUES('https://h/was','Acme','Analyst','ashby','2026-09-01',"
+                 "'acme|analyst',datetime('now'))")
+    conn.execute("INSERT INTO jobs(url,company,title,source,first_seen,dedup) "
+                 "VALUES('https://h/again','Acme','Analyst','ashby',datetime('now'),"
+                 "'acme|analyst')")
+    conn.commit()
+    # вернувшаяся из закрытых: в приход не попадает, из ухода выбывает
+    conn.execute("INSERT INTO jobs(url,company,title,source,first_seen,dedup,reopened_at) "
+                 "VALUES('https://h/back','Acme','SRE','ashby','2026-09-01',"
+                 "'acme|sre',datetime('now'))")
+    conn.commit()
     text = bot.health_report(conn)
-    assert "+2 вакансий · закрылось 1" in text
+    assert "+2 вакансий · закрылось 1 · вернулось 1" in text

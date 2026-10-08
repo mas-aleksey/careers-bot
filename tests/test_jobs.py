@@ -751,8 +751,9 @@ def test_closed_job_reopens_when_it_is_back_on_the_board(monkeypatch):
                         lambda s: [("https://back.test/j1", "Backend", "Porto", None)])
     new, _, _, _, reopened = jobs.run(only="Вернулась")
     assert reopened == 1
-    assert conn.execute("SELECT closed_at FROM jobs WHERE url='https://back.test/j1'"
-                        ).fetchone()[0] is None
+    row = conn.execute("SELECT closed_at, reopened_at FROM jobs "
+                       "WHERE url='https://back.test/j1'").fetchone()
+    assert row[0] is None and row[1]           # отметка нужна суточной сводке
     assert new == []                           # не новая: человек её уже видел
 
 

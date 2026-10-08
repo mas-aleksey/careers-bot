@@ -1148,17 +1148,26 @@ def health_report(conn):
     # адресами, а Ashby у Clera ещё и перевыпускает id: та же «Founding Engineer»
     # уходит закрытой и заводится заново. По строкам выходило +363/-334 в сутки
     # при настоящих +321/-238.
-    day = conn.execute("SELECT COUNT(DISTINCT dedup) FROM jobs "
-                       "WHERE first_seen > datetime('now','-1 day')").fetchone()[0]
+    # Новой считается та, которой раньше не было вовсе. Перевыпуск id заводит
+    # новую строку в старой группе — вакансия при этом не появилась.
+    day = conn.execute("""
+        SELECT COUNT(DISTINCT j.dedup) FROM jobs j
+        WHERE j.first_seen > datetime('now','-1 day')
+          AND NOT EXISTS (SELECT 1 FROM jobs p WHERE p.dedup = j.dedup
+                          AND p.first_seen <= datetime('now','-1 day'))""").fetchone()[0]
     # Закрытой считаем ту, у которой не осталось ни одной живой копии.
     closed = conn.execute("""
         SELECT COUNT(DISTINCT o.dedup) FROM jobs o
         WHERE o.closed_at > datetime('now','-1 day')
           AND NOT EXISTS (SELECT 1 FROM jobs n
                           WHERE n.dedup = o.dedup AND n.closed_at IS NULL)""").fetchone()[0]
+    # Вернувшиеся из закрытых: в приход не попадают (first_seen старый), из
+    # ухода выбывают (closed_at снят) — без своей строки их не видно вовсе.
+    back = conn.execute("SELECT COUNT(DISTINCT dedup) FROM jobs "
+                        "WHERE reopened_at > datetime('now','-1 day')").fetchone()[0]
     total = conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0]
-    lines = [f"<b>Источники за сутки</b>",
-             f"{total} компаний · +{day} вакансий · закрылось {closed}"]
+    head = f"{total} компаний · +{day} вакансий · закрылось {closed}"
+    lines = [f"<b>Источники за сутки</b>", head + (f" · вернулось {back}" if back else "")]
     if silent:
         lines.append("")
         lines.append("⚠️ <b>Не отдают вакансии:</b>")
