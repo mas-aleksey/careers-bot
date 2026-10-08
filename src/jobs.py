@@ -423,7 +423,7 @@ def plain_text(html, limit=12000):
     return html_mod.unescape(txt)[:limit] or None
 
 
-def wordpress(s):
+def wordpress(s, known=()):
     """WP REST API с типом записи jobs: отдаёт список без ключа и без JS.
 
     Слаг — host или host/тип: имя типа записи у каждого сайта своё, у BNP это
@@ -431,16 +431,40 @@ def wordpress(s):
 
     У BNP Paribas это единственный читаемый перечень: портал Avature на
     bwelcome.hr.bnpparibas отдаёт карточку по jobId, но страницы со списком
-    у него наружу нет. Локации в API нет ни в одном поле — остаётся пустой,
-    страну видно по домену сайта."""
+    у него наружу нет. Локации в API нет ни в одном поле, её дочитывает
+    wp_places со страницы вакансии."""
     host, _, kind = s.partition("/")
     for kind in ([kind] if kind else WP_TYPES):
         out = _wp_type(host, kind)
         if out:
             # У Akvelon тип vacancy не отдаёт content через REST: поле просто
             # не зарегистрировано. Текст дочитываем со страницы вакансии.
-            return page_text(out, f"https://{host}")
+            return wp_places(page_text(out, f"https://{host}"), known)
     return None
+
+
+# Шапка карточки вакансии: <li> с иконкой icon-location, внутри <span> с
+# городом в формате PT-Porto-Porto. Ищем от иконки до первого span: между
+# ними только <use href="…#icon-location">, своего span у него нет.
+WP_PLACE = re.compile(r"icon-location.*?<span>([^<]*)</span>", re.S)
+
+
+def wp_places(rows, known):
+    """Дочитать город со страницы вакансии: в WP REST его нет ни в одном поле.
+
+    known — адреса, уже известные базе. Обход идёт каждые четыре часа, и без
+    этого отсечения 206 вакансий BNP означали бы 1200 лишних запросов в сутки
+    к одному хосту ради строки, которая не меняется."""
+    out = []
+    for r in rows:
+        if r[2] or r[0] in known:
+            out.append(r)
+            continue
+        page = get(r[0], want_json=False)
+        m = WP_PLACE.search(page) if isinstance(page, str) else None
+        where = html_mod.unescape(m.group(1)).strip() if m else ""
+        out.append(r[:2] + (where,) + r[3:])
+    return out
 
 
 WP_TYPES = ("jobs", "vacancy", "vacancies", "job_listing", "careers")
@@ -978,13 +1002,16 @@ def db():
     return storage.connect()
 
 
-def collect(name, url, cache):
+def collect(name, url, cache, known=()):
     """Один поток на компанию. Соединение SQLite между потоками не живёт, поэтому
-    известные ats/slug читаются заранее в словарь. Discovery сюда не входит:
-    Workable режет параллельные запросы, и компания молча теряется."""
+    известные ats/slug и адреса известных вакансий читаются заранее. Discovery
+    сюда не входит: Workable режет параллельные запросы, и компания молча
+    теряется."""
     ats, slug = cache.get(name, (None, None))
     if ats == "embedded":
         return name, ats, slug, embedded(url, with_text=True) or [], None
+    if ats == "wordpress":
+        return name, ats, slug, wordpress(slug, known), None
     if ats:
         # None (доска не ответила) не схлопывать в []: иначе 429 от Workable
         # попадает в отчёт как «доска вернула пустой список» и diagnose молчит
@@ -993,7 +1020,7 @@ def collect(name, url, cache):
     if jobs:
         return name, "embedded", url, jobs, None
     host = urllib.parse.urlparse(url).netloc
-    jobs = wordpress(host) if host else None   # ступень 3б: WP REST API сайта
+    jobs = wordpress(host, known) if host else None   # ступень 3б: WP REST API сайта
     if jobs:
         return name, "wordpress", host, jobs, None
     return name, None, None, None, page_hash(url)
@@ -1023,6 +1050,7 @@ def run(only=None):
         companies = [c for c in companies if c[0] not in fresh]
     cache = {n: (a, s) for n, a, s in conn.execute(
         "SELECT name, ats, slug FROM companies WHERE ats IS NOT NULL")}
+    known = {u for (u,) in conn.execute("SELECT url FROM jobs")}
     # discovery последовательно и один раз на компанию: параллельно ATS отдают 429
     for name, url in companies:
         if name not in cache:
@@ -1031,7 +1059,7 @@ def run(only=None):
                 cache[name] = found
             time.sleep(0.3)
     with ThreadPoolExecutor(max_workers=5) as ex:
-        results = list(ex.map(lambda c: collect(c[0], c[1], cache), companies))
+        results = list(ex.map(lambda c: collect(c[0], c[1], cache, known), companies))
 
     new, changed, stats, closed, to_diagnose = [], [], [], [], []
     reopened = 0

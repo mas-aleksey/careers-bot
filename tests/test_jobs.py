@@ -754,3 +754,21 @@ def test_closed_job_reopens_when_it_is_back_on_the_board(monkeypatch):
     assert conn.execute("SELECT closed_at FROM jobs WHERE url='https://back.test/j1'"
                         ).fetchone()[0] is None
     assert new == []                           # не новая: человек её уже видел
+
+
+def test_wp_places_reads_the_city_only_for_new_jobs(monkeypatch):
+    """Город у BNP есть только в шапке страницы. Известной вакансии он уже
+    записан, и лишний запрос к сайту ничего не добавит."""
+    seen = []
+    card = ('<p class="crd__reference">Reference111</p><ul class="crd__specs">'
+            '<li><span>Permanent</span></li>'
+            '<li><svg class="icon icon-location"><use href="#icon-location">'
+            '</use></svg><span>PT-Porto-Porto</span></li></ul>')
+    monkeypatch.setattr(jobs, "get", lambda url, **kw: seen.append(url) or card)
+    rows = jobs.wp_places(
+        [("https://x.test/jobs/a/", "PO", "", None, None, "", "текст"),
+         ("https://x.test/jobs/b/", "BA", "", None, None, "", "текст"),
+         ("https://x.test/jobs/c/", "QA", "Lisboa", None, None, "", "текст")],
+        {"https://x.test/jobs/b/"})
+    assert seen == ["https://x.test/jobs/a/"]
+    assert [r[2] for r in rows] == ["PT-Porto-Porto", "", "Lisboa"]
