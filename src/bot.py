@@ -1165,9 +1165,32 @@ def health_report(conn):
     # ухода выбывают (closed_at снят) — без своей строки их не видно вовсе.
     back = conn.execute("SELECT COUNT(DISTINCT dedup) FROM jobs "
                         "WHERE reopened_at > datetime('now','-1 day')").fetchone()[0]
+    # Разбор по компаниям теми же правилами, что и шапка: иначе сумма не сойдётся
+    # с итогом, и это заметят первым же утром. Сортировка по сумме движения —
+    # Salmon с нулевым приходом и двумя десятками закрытий не теряется.
+    movers = conn.execute("""
+        SELECT company,
+               SUM(CASE WHEN came THEN 1 ELSE 0 END)  AS plus,
+               SUM(CASE WHEN came THEN 0 ELSE 1 END)  AS minus
+        FROM (
+          SELECT DISTINCT j.company, j.dedup, 1 AS came FROM jobs j
+           WHERE j.first_seen > datetime('now','-1 day')
+             AND NOT EXISTS (SELECT 1 FROM jobs p WHERE p.dedup = j.dedup
+                             AND p.first_seen <= datetime('now','-1 day'))
+          UNION ALL
+          SELECT DISTINCT o.company, o.dedup, 0 FROM jobs o
+           WHERE o.closed_at > datetime('now','-1 day')
+             AND NOT EXISTS (SELECT 1 FROM jobs n WHERE n.dedup = o.dedup
+                             AND n.closed_at IS NULL))
+        GROUP BY company ORDER BY plus + minus DESC LIMIT 5""").fetchall()
     total = conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0]
     head = f"{total} компаний · +{day} вакансий · закрылось {closed}"
     lines = [f"<b>Источники за сутки</b>", head + (f" · вернулось {back}" if back else "")]
+    if movers:
+        lines.append("")
+        lines.append("<b>Движение по компаниям:</b>")
+        for name, plus, minus in movers:
+            lines.append(f"· {esc(name)}: +{plus} / −{minus}")
     if silent:
         lines.append("")
         lines.append("⚠️ <b>Не отдают вакансии:</b>")

@@ -484,3 +484,5 @@ def test_health_counts_vacancies_not_rows():
     conn.commit()
     text = bot.health_report(conn)
     assert "+2 вакансий · закрылось 1 · вернулось 1" in text
+    # разбор по компаниям считает теми же правилами, что и шапка
+    assert "· Acme: +2 / −1" in text
