@@ -40,7 +40,7 @@ def space_out(url):
         time.sleep(delay)
 
 
-def get(url, want_json=True, with_code=False):
+def get(url, want_json=True, with_code=False, data=None):
     """404 — честный ответ «доски нет». 429 и 5xx — временные, один повтор:
     при восьми потоках ATS отдают 429, и компания молча теряется до следующего дня.
 
@@ -50,7 +50,9 @@ def get(url, want_json=True, with_code=False):
     for attempt in (0, 1):
         try:
             space_out(url)
-            r = urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=TIMEOUT)
+            head = dict(UA, **({"Content-Type": "application/json"} if data else {}))
+            r = urllib.request.urlopen(
+                urllib.request.Request(url, data=data, headers=head), timeout=TIMEOUT)
             raw, code = r.read(), r.status
             break
         except urllib.error.HTTPError as e:
@@ -109,6 +111,7 @@ ATS_IN_URL = [
     ("recruitee", r"([a-z0-9-]+)\.recruitee\.com"),
     ("workable", r"apply\.workable\.com/([^/?#]+)"),
     ("personio", r"([a-z0-9-]+)\.jobs\.personio\.de"),
+    ("bamboohr", r"([a-z0-9-]+)\.bamboohr\.com"),
     ("peopleforce", r"(careers\.[a-z0-9.-]+)/v/\d+-"),
     ("revolutpeople", r"([a-z0-9-]+)\.revolutpeople\.com"),
     ("revolutpeople", r"revolutpeople\.com/([a-z0-9-]+)/"),
@@ -183,6 +186,9 @@ def posted(value):
     m = re.match(r"(\d{4}-\d{2}-\d{2})", str(value))
     return m.group(1) if m else None
 
+
+PHENOM_SIZE = 50      # больше виджет не отдаёт: при 100 возвращает те же 50
+PHENOM_PAGES = 20     # потолок на случай, если totalHits врёт: 1000 вакансий
 
 # --- адаптеры ---------------------------------------------------------------
 # Ashby, Workable и SmartRecruiters отдают 200 на любой slug — проверяем тело.
@@ -265,6 +271,37 @@ def smartrecruiters(s):
                     sr_place(j.get("location") or {}),
                     posted(j.get("releasedDate")), None, "", sr_text(s, j["id"])))
     return out
+
+
+def bb_place(j):
+    """Локация у BambooHR разложена по двум объектам, и оба бывают пустыми.
+    Берём первый непустой: atsLocation точнее, location остаётся у старых
+    вакансий."""
+    for key in ("atsLocation", "location"):
+        d = j.get(key) or {}
+        parts = [d.get("city"), d.get("state") or d.get("province"), d.get("country")]
+        place = ", ".join(x for x in parts if x)
+        if place:
+            return place
+    return "Remote" if j.get("isRemote") else ""
+
+
+def bamboohr(s):
+    """Список без текста, текст — карточкой на вакансию. Запрос на каждую:
+    доски BambooHR маленькие, у StellarTech 15 вакансий."""
+    d = get(f"https://{s}.bamboohr.com/careers/list")
+    if not isinstance(d, dict) or not d.get("result"):
+        return None
+    out = []
+    for j in d["result"]:
+        jid = j.get("id")
+        card = get(f"https://{s}.bamboohr.com/careers/{jid}/detail") or {}
+        opening = (card.get("result") or {}).get("jobOpening") or {}
+        out.append((f"https://{s}.bamboohr.com/careers/{jid}",
+                    (j.get("jobOpeningName") or "").strip(), bb_place(j),
+                    posted(opening.get("datePosted")), None, "",
+                    plain_text(opening.get("description"))))
+    return out or None
 
 
 def wk_rows(js):
@@ -354,8 +391,12 @@ def tt_place(item):
 
 
 def teamtailor(s):
-    """Отдаёт JSON Feed: вакансии лежат в items, а не в jobs."""
-    d = get(f"https://{s}.teamtailor.com/jobs.json")
+    """Отдаёт JSON Feed: вакансии лежат в items, а не в jobs.
+
+    Слаг с точкой — это свой домен компании: Trackunit держит фид на
+    careers.trackunit.com, а trackunit.teamtailor.com отдаёт 404."""
+    host = s if "." in s else f"{s}.teamtailor.com"
+    d = get(f"https://{host}/jobs.json")
     if not isinstance(d, dict):
         return None
     items = d.get("items") or d.get("jobs") or []
@@ -675,10 +716,177 @@ def peopleforce(s):
     return out or None
 
 
-ADAPTERS = {"ashby": ashby, "greenhouse": greenhouse, "lever": lever,
+SF_PAGE = 10          # строк на странице выдачи SuccessFactors, менять нельзя
+SF_PAGES = 80         # потолок обхода: 800 вакансий, у Vestas сейчас 631
+
+
+SF_ROW = re.compile(r'<tr class="data-row">(.*?)</tr>', re.S)
+SF_LINK = re.compile(r'href="(/job/[^"]+)"[^>]*class="jobTitle-link">(.*?)</a>', re.S)
+SF_PLACE = re.compile(r'<span class="jobLocation"[^>]*>(.*?)</span>', re.S)
+SF_DATE = re.compile(r'(\d{1,2} [A-Za-z]{3,4} \d{4})')
+SF_TOTAL = re.compile(r'Results 1 to \d+ of (\d+)')
+
+
+def sf_date(txt):
+    """«11 Oct 2026» к ISO. Просим страницу на en_GB, иначе месяц датский."""
+    # «Sept» вместо «Sep» — так SuccessFactors пишет сентябрь, и на нём
+    # молча терялась дата у каждой шестой вакансии.
+    txt = txt.replace("Sept ", "Sep ")
+    try:
+        return datetime.strptime(txt, "%d %b %Y").date().isoformat()
+    except ValueError:
+        return None
+
+
+COMEET_ITEM = re.compile(r'<li class="comeet-position[^"]*".*?</li>', re.S)
+COMEET_LINK = re.compile(r'comeet-position-name[^>]*>\s*<a href="([^"]+)"[^>]*>(.*?)</a>', re.S)
+COMEET_META = re.compile(r'comeet-position-meta[^>]*>(.*?)</', re.S)
+
+
+def comeet(s):
+    """Comeet через WordPress-плагин: вакансии уже вшиты в страницу, API не нужен.
+
+    Слаг — адрес страницы без схемы (medvidi.com/careers/co/remote-eu/all).
+    Ссылки в разметке протокол-относительные («//medvidi.com/...»), поэтому
+    склеиваем через urljoin, иначе в базу уедет битый url. Текста вакансии на
+    странице списка нет."""
+    page = get(f"https://{s}", want_json=False)
+    if not page or "comeet-position" not in page:
+        return None
+    out = []
+    for item in COMEET_ITEM.findall(page):
+        link = COMEET_LINK.search(item)
+        if not link:
+            continue
+        meta = COMEET_META.search(item)
+        # Мета-строка «Remote EU · Full-time · Senior»: место, занятость, грейд.
+        # Грейд из неё в заголовок не тащим — его читает оценка по тексту.
+        place = (plain_text(meta.group(1)) if meta else "") or ""
+        out.append((urllib.parse.urljoin(f"https://{s}", link.group(1)),
+                    plain_text(link.group(2)) or "",
+                    place.split("·")[0].strip(),
+                    None, None, "", None))
+    return out or None
+
+
+ORACLE_SIZE = 50      # больше за раз ORC не отдаёт
+
+
+def oracle(s):
+    """Oracle Recruiting Cloud: слаг — «хост/сайт», например
+    fa-evem-saasfaprod1.fa.ocs.oraclecloud.com/CX_1.
+
+    Отдаёт JSON без ключа, но пагинация странная: limit и offset едут внутри
+    finder, а не отдельными параметрами. Текста вакансии в списке нет, он за
+    отдельным запросом на каждую — как у SuccessFactors, не берём."""
+    host, _, site = s.partition("/")
+    if not site:
+        return None
+    out, total = [], None
+    for page in range(20):
+        # Без expand список приходит пустым, а TotalJobsCount — настоящим:
+        # молчаливая разница, на которой адаптер сначала вернул ноль вакансий.
+        d = get(f"https://{host}/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
+                f"?onlyData=true&expand=requisitionList"
+                f"&finder=findReqs;siteNumber={site},"
+                f"limit={ORACLE_SIZE},offset={page * ORACLE_SIZE},sortBy=POSTING_DATES_DESC")
+        items = (d or {}).get("items") or []
+        if not items:
+            break
+        block = items[0]
+        if total is None:
+            total = block.get("TotalJobsCount") or 0
+        reqs = block.get("requisitionList") or []
+        if not reqs:
+            break
+        for j in reqs:
+            jid = j.get("Id")
+            out.append((f"https://{host}/hcmUI/CandidateExperience/en/sites/{site}/job/{jid}/",
+                        j.get("Title", ""),
+                        j.get("PrimaryLocation") or j.get("PrimaryLocationCountry") or "",
+                        posted(j.get("PostedDate")), None, "", None))
+        if total and len(out) >= total:
+            break
+    return out or None
+
+
+def successfactors(s):
+    """Карьерный сайт SAP SuccessFactors (RMK): выдача — обычная HTML-таблица
+    по десять строк, пагинация через startrow.
+
+    Слаг — хост целиком (careers.vestas.com). Текста вакансии в выдаче нет, он
+    только на странице вакансии: качать 631 страницу ради описаний дороже, чем
+    оценивать по заголовку и локации, поэтому описание пустое."""
+    out, total = [], None
+    for page in range(SF_PAGES):
+        html_txt = get(f"https://{s}/search/?q=&sortColumn=referencedate"
+                       f"&sortDirection=desc&startrow={page * SF_PAGE}&locale=en_GB",
+                       want_json=False)
+        if not html_txt:
+            break
+        if total is None:
+            m = SF_TOTAL.search(html_txt)
+            total = int(m.group(1)) if m else 0
+        rows = SF_ROW.findall(html_txt)
+        if not rows:
+            break
+        for row in rows:
+            link = SF_LINK.search(row)
+            if not link:
+                continue
+            place = SF_PLACE.search(row)
+            date = SF_DATE.search(re.sub(r"<[^>]+>", " ", row))
+            out.append((urllib.parse.urljoin(f"https://{s}", link.group(1)),
+                        plain_text(link.group(2)) or "",
+                        plain_text(place.group(1)) if place else "",
+                        sf_date(date.group(1)) if date else None,
+                        None, "", None))
+        if total and len(out) >= total:
+            break
+    return out or None
+
+
+def phenom(s):
+    """Карьерный сайт на Phenom: список отдаёт виджет, и только POST-ом.
+
+    Слаг — это хост целиком (careers.genmab.com): Phenom живёт на домене
+    компании, общего поддомена у него нет. Ссылка ведёт сразу в ATS, куда
+    принимают отклик, — у Genmab это Workday.
+
+    Текста вакансии виджет не отдаёт, только тизер в пару строк. Склеиваем его
+    с распознанными навыками: это заметно беднее полного описания, но оценка по
+    одному заголовку слепа к стеку."""
+    out, seen = [], 0
+    for _ in range(PHENOM_PAGES):
+        d = get(f"https://{s}/widgets", data=json.dumps({
+            "lang": "en_global", "deviceType": "desktop", "country": "global",
+            "pageName": "search-results", "ddoKey": "refineSearch", "from": seen,
+            "size": PHENOM_SIZE, "jobs": True, "counts": True, "global": True,
+            "siteType": "external", "keywords": "", "sortBy": "",
+            "all_fields": ["country", "state", "city", "category"]}).encode())
+        rs = (d or {}).get("refineSearch") or {}
+        jobs = (rs.get("data") or {}).get("jobs") or []
+        if not jobs:
+            break
+        for j in jobs:
+            skills = ", ".join(j.get("ml_skills") or [])
+            text = " ".join(x for x in (j.get("descriptionTeaser"), skills) if x)
+            out.append((j.get("applyUrl", ""), j.get("title", ""),
+                        j.get("cityStateCountry") or j.get("location") or "",
+                        posted(j.get("postedDate") or j.get("dateCreated")),
+                        None, "", text or None))
+        seen += len(jobs)
+        if seen >= (rs.get("totalHits") or 0):
+            break
+    return out or None
+
+
+ADAPTERS = {"ashby": ashby, "phenom": phenom, "successfactors": successfactors,
+            "oracle": oracle, "comeet": comeet, "greenhouse": greenhouse, "lever": lever,
             "smartrecruiters": smartrecruiters, "workable": workable,
             "recruitee": recruitee, "teamtailor": teamtailor, "pinpoint": pinpoint,
             "personio": personio,
+            "bamboohr": bamboohr,
             "wordpress": wordpress,
             "revolutpeople": revolutpeople,
             "aristek": aristek,
@@ -695,7 +903,8 @@ def discover(name, url):
         return hit
     for s in slug_variants(name):
         for ats in ("ashby", "greenhouse", "lever", "smartrecruiters", "workable",
-                    "recruitee", "teamtailor", "pinpoint", "personio"):
+                    "recruitee", "teamtailor", "pinpoint", "personio",
+                    "bamboohr"):
             # Пустая доска — не доказательство, что это та самая компания:
             # Workable заводит аккаунты под кучу имён, и Atlassian с Revolut
             # получили чужие. Для discovery годится только доска с вакансиями.
@@ -772,6 +981,40 @@ APPLY_LINK = re.compile(
     r"<h[1-4][^>]*>(?P<title>[^<]{3,80})</h[1-4]>"
     r"(?:(?!<h[1-4])[\s\S]){0,800}?"
     r'href="(?P<href>https://(?:' + APPLY_HOSTS + r')/apply/[^"]+)"')
+
+
+LD_JSON = re.compile(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', re.S)
+
+
+def ld_remote(j):
+    """Для удалённой вакансии правда — не адрес офиса, а страны, из которых
+    берут. У SDG в jobLocation стоит Лимасол, а нанимают в семи странах."""
+    req = j.get("applicantLocationRequirements") or []
+    if isinstance(req, dict):
+        req = [req]
+    names = [r.get("name") for r in req if isinstance(r, dict) and r.get("name")]
+    return "Remote: " + ", ".join(names[:6]) if names else ""
+
+
+def jsonld_jobs(html):
+    """Ступень 3, стандартный случай: сайт публикует вакансии разметкой
+    schema.org. Текст и дата лежат там же — дочитывать страницы не нужно."""
+    out = []
+    for block in LD_JSON.findall(html):
+        try:
+            data = json.loads(block)
+        except ValueError:
+            continue
+        for j in (data if isinstance(data, list) else [data]):
+            if not isinstance(j, dict) or j.get("@type") != "JobPosting" or not j.get("url"):
+                continue
+            where = tt_place({"_jobposting": j})
+            if not where or j.get("jobLocationType") == "TELECOMMUTE":
+                where = ld_remote(j) or where
+            out.append((j["url"], (j.get("title") or "").strip(), where,
+                        posted(j.get("datePosted")), None, "",
+                        plain_text(j.get("description"))))
+    return out
 
 
 def apply_links(html):
@@ -956,7 +1199,7 @@ def embedded(url, with_text=False):
     base = url.rstrip("/")
     out = [(f"{base}/{jid}", title.strip(), company.strip(), None)
            for jid, title, company in JOB_IN_PAYLOAD.findall(html)]
-    rows = (out or next_data(html) or linked_jobs(html, url)
+    rows = (out or jsonld_jobs(html) or next_data(html) or linked_jobs(html, url)
             or notion_jobs(html) or apply_links(html) or flight_jobs(html, url))
     return page_text(rows, url) if rows and with_text else rows
 
@@ -971,7 +1214,8 @@ def diagnose(ats, slug, url):
              "workable": f"https://apply.workable.com/api/v1/widget/accounts/{slug}",
              "recruitee": f"https://{slug}.recruitee.com/api/offers/",
              "teamtailor": f"https://{slug}.teamtailor.com/jobs.json",
-             "pinpoint": f"https://{slug}.pinpointhq.com/postings.json"}.get(ats, url)
+             "pinpoint": f"https://{slug}.pinpointhq.com/postings.json",
+             "bamboohr": f"https://{slug}.bamboohr.com/careers/list"}.get(ats, url)
     if not probe:
         return "нет адреса для проверки"
     try:

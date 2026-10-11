@@ -1,3 +1,4 @@
+import re
 import jobs
 
 
@@ -257,6 +258,130 @@ def test_teamtailor_takes_location_from_jobposting():
     assert jobs.tt_place({"_jobposting": "{'jobLocation': [{'address': {'addressCountry': 'PL'}}]}"}) == "PL"
     assert jobs.tt_place({}) == ""
     assert jobs.tt_place({"_jobposting": "не json"}) == ""
+
+
+COMEET_HTML = """
+<ul class="comeet-positions-list">
+<li class="comeet-position"><div class="comeet-position-name"><a href="//medvidi.com/careers/co/remote-eu/48.769/engineering-manager/all">Engineering Manager</a></div><div class="comeet-position-meta">Remote EU  &middot;  Full-time  &middot;  Management</div></li>
+<li class="comeet-position"><div class="comeet-position-name"><a href="//medvidi.com/careers/co/remote-eu/DC.17A/senior-frontend/all">Senior Frontend Developer</a></div><div class="comeet-position-meta">Remote EU  &middot;  Full-time  &middot;  Senior</div></li>
+</ul>
+"""
+
+
+def test_comeet_reads_positions_from_page(monkeypatch):
+    """Comeet-плагин вшивает вакансии прямо в страницу. Ссылки
+    протокол-относительные — без urljoin в базу уехал бы битый url."""
+    import jobs
+    monkeypatch.setattr(jobs, "get", lambda u, want_json=True, **k: COMEET_HTML)
+    got = jobs.comeet("medvidi.com/careers/co/remote-eu/all")
+    assert len(got) == 2
+    assert got[0][0] == "https://medvidi.com/careers/co/remote-eu/48.769/engineering-manager/all"
+    assert got[0][1] == "Engineering Manager"
+    assert got[0][2] == "Remote EU"
+    # Чужая страница без разметки Comeet — не доска
+    monkeypatch.setattr(jobs, "get", lambda u, want_json=True, **k: "<html>нет вакансий</html>")
+    assert jobs.comeet("example.com/careers") is None
+
+
+def test_oracle_needs_expand_and_pages_by_total(monkeypatch):
+    """Oracle Recruiting Cloud: limit и offset едут внутри finder, а без
+    expand список приходит пустым при честном TotalJobsCount."""
+    import jobs
+    seen = []
+
+    def fake_get(url, want_json=True, **k):
+        seen.append(url)
+        off = int(re.search(r"offset=(\d+)", url).group(1))
+        n = 50 if off == 0 else 2
+        return {"items": [{"TotalJobsCount": 52, "requisitionList": [
+            {"Id": 100 + off + i, "Title": "Postbud", "PrimaryLocation": "OSLO, Norge",
+             "PostedDate": "2026-10-09"} for i in range(n)]}]}
+
+    monkeypatch.setattr(jobs, "get", fake_get)
+    got = jobs.oracle("fa-evem.oraclecloud.com/CX_1")
+    assert len(got) == 52 and len(seen) == 2
+    assert "expand=requisitionList" in seen[0] and "offset=50" in seen[1]
+    assert got[0][0].endswith("/sites/CX_1/job/100/")
+    assert got[0][1:4] == ("Postbud", "OSLO, Norge", "2026-10-09")
+    # Слаг без сайта — не доска Oracle, в сеть не ходим
+    seen.clear()
+    assert jobs.oracle("fa-evem.oraclecloud.com") is None and not seen
+
+
+SF_PAGE_HTML = """
+<p>Results 1 to 10 of 12</p>
+<tr class="data-row">
+  <td><span class="jobTitle"><a href="/job/Aarhus-Data-Engineer/8200/" class="jobTitle-link">Data Engineer</a></span></td>
+  <td><span class="jobLocation">Aarhus N, DK, 8200</span> 25 Sept 2026</td>
+</tr>
+<tr class="data-row">
+  <td><span class="jobTitle"><a href="/job/Tokyo-Sales/107/" class="jobTitle-link">Sales Director</a></span></td>
+  <td><span class="jobLocation">Tokyo, JP</span> 8 Oct 2026</td>
+</tr>
+"""
+
+
+def test_successfactors_parses_rows_and_stops_on_total(monkeypatch):
+    """Выдача SuccessFactors — HTML-таблица по десять строк. Проверяем разбор
+    строки, абсолютный url, «Sept» в дате и остановку по счётчику Results."""
+    import jobs
+    seen = []
+
+    def fake_get(url, want_json=True, **k):
+        seen.append(url)
+        return SF_PAGE_HTML if len(seen) <= 6 else ""
+
+    monkeypatch.setattr(jobs, "get", fake_get)
+    got = jobs.successfactors("careers.vestas.com")
+    assert got[0][:4] == ("https://careers.vestas.com/job/Aarhus-Data-Engineer/8200/",
+                          "Data Engineer", "Aarhus N, DK, 8200", "2026-09-25")
+    assert got[1][3] == "2026-10-08"
+    # 12 вакансий по счётчику, по 2 в нашей заглушке — шесть страниц и стоп
+    assert len(got) == 12 and len(seen) == 6
+    assert "startrow=10" in seen[1] and "locale=en_GB" in seen[0]
+
+
+def test_phenom_posts_widget_and_pages_until_total(monkeypatch):
+    """Phenom отдаёт список только POST-ом и страницами по 50. Проверяем, что
+    тело уходит, вторая страница запрашивается со сдвигом и на totalHits мы
+    останавливаемся, а не крутим двадцать запросов."""
+    import json as js, jobs
+    calls = []
+
+    def fake_get(url, want_json=True, with_code=False, data=None):
+        body = js.loads(data)
+        calls.append((url, body["from"]))
+        n = 50 if body["from"] == 0 else 1
+        return {"refineSearch": {"totalHits": 51, "data": {"jobs": [
+            {"applyUrl": f"https://ats/{body['from']}-{i}", "title": "Data Engineer",
+             "cityStateCountry": "Copenhagen, Capital, Denmark",
+             "postedDate": "2026-10-07T00:00:00.000+0000",
+             "descriptionTeaser": "Build pipelines", "ml_skills": ["dbt", "Airflow"]}
+            for i in range(n)]}}}
+
+    monkeypatch.setattr(jobs, "get", fake_get)
+    got = jobs.phenom("careers.genmab.com")
+    assert [c[1] for c in calls] == [0, 50]
+    assert calls[0][0] == "https://careers.genmab.com/widgets"
+    assert len(got) == 51
+    assert got[0][:4] == ("https://ats/0-0", "Data Engineer",
+                          "Copenhagen, Capital, Denmark", "2026-10-07")
+    assert got[0][6] == "Build pipelines dbt, Airflow"
+    # Пустая выдача — не доска Phenom, а чужой сайт: None, а не []
+    monkeypatch.setattr(jobs, "get", lambda *a, **k: {"refineSearch": {}})
+    assert jobs.phenom("careers.nobody.com") is None
+
+
+def test_teamtailor_slug_with_dot_is_own_domain(monkeypatch):
+    """Свой домен вместо поддомена Teamtailor: у Trackunit фид на
+    careers.trackunit.com, trackunit.teamtailor.com отдаёт 404."""
+    import jobs
+    seen = []
+    monkeypatch.setattr(jobs, "get", lambda u, **k: seen.append(u) or {"items": []})
+    jobs.teamtailor("praktika")
+    jobs.teamtailor("careers.trackunit.com")
+    assert seen == ["https://praktika.teamtailor.com/jobs.json",
+                    "https://careers.trackunit.com/jobs.json"]
 
 
 PERSONIO_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -773,3 +898,51 @@ def test_wp_places_reads_the_city_only_for_new_jobs(monkeypatch):
         {"https://x.test/jobs/b/"})
     assert seen == ["https://x.test/jobs/a/"]
     assert [r[2] for r in rows] == ["PT-Porto-Porto", "", "Lisboa"]
+
+
+BB_LIST = {"meta": {"totalCount": 2}, "result": [
+    {"id": "205", "jobOpeningName": " Backend Lead ",
+     "atsLocation": {"city": None, "country": None}, "location": {"city": None},
+     "isRemote": True},
+    {"id": "274", "jobOpeningName": "Customer Care",
+     "atsLocation": {"city": "Warsaw", "country": "Poland"}, "isRemote": None}]}
+BB_DETAIL = {"meta": {}, "result": {"jobOpening": {
+    "datePosted": "2026-06-01", "description": "<p>Python и <b>Go</b></p>"}}}
+
+
+def test_bamboohr_reads_list_and_cards(monkeypatch):
+    """Список без текста, текст — отдельной карточкой. Локации в списке часто
+    пустые: у StellarTech они null во всех вакансиях, кроме одной."""
+    monkeypatch.setattr(jobs, "get",
+                        lambda url, **kw: BB_DETAIL if "/detail" in url else BB_LIST)
+    rows = jobs.bamboohr("stellartech")
+    assert [(r[0], r[1], r[2], r[3]) for r in rows] == [
+        ("https://stellartech.bamboohr.com/careers/205", "Backend Lead", "Remote", "2026-06-01"),
+        ("https://stellartech.bamboohr.com/careers/274", "Customer Care", "Warsaw, Poland", "2026-06-01")]
+    assert "Python и Go" in rows[0][6]
+    monkeypatch.setattr(jobs, "get", lambda url, **kw: {"meta": {}, "result": []})
+    assert jobs.bamboohr("stellartech") is None
+
+
+LD_PAGE = """<html><script type="application/ld+json">[
+ {"@type":"JobPosting","title":" SRE ","url":"https://x.test/j/1",
+  "datePosted":"2026-05-11","jobLocationType":"TELECOMMUTE",
+  "jobLocation":{"address":{"addressLocality":"Limassol","addressCountry":"CY"}},
+  "applicantLocationRequirements":[{"name":"Serbia"},{"name":"Poland"}],
+  "description":"<p>Go и <b>k8s</b></p>"},
+ {"@type":"JobPosting","title":"Офис","url":"https://x.test/j/2",
+  "jobLocation":{"address":{"addressLocality":"Warsaw","addressCountry":"PL"}},
+  "description":"текст"},
+ {"@type":"Organization","name":"не вакансия"}]</script></html>"""
+
+
+def test_jsonld_prefers_hiring_countries_for_remote():
+    """Удалённую вакансию выдаёт не адрес офиса: у SDG в jobLocation стоит
+    Лимасол, а нанимают в семи странах. Офисная локацию сохраняет."""
+    rows = jobs.jsonld_jobs(LD_PAGE)
+    assert [(r[0], r[1], r[2], r[3]) for r in rows] == [
+        ("https://x.test/j/1", "SRE", "Remote: Serbia, Poland", "2026-05-11"),
+        ("https://x.test/j/2", "Офис", "Warsaw, PL", None)]
+    assert "Go и k8s" in rows[0][6]
+    assert jobs.jsonld_jobs("<html>без разметки</html>") == []
+    assert jobs.jsonld_jobs('<script type="application/ld+json">не json</script>') == []
