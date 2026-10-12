@@ -278,58 +278,154 @@ SCORE_CHARS = 3000     # требования лежат в первой пол�
 SCORE_SLICE = 120      # вакансий за один проход: потолок расхода на цикл
 WHY_CHARS = 400        # обоснование: выходные токены впятеро дороже входных
 WHERE_CHARS = 80       # строка про страну найма и формат
-TRIAGE_BATCH = 10      # с текстом пачка тяжелее, и на длинном входе модель
-                       # чаще не перечисляет всё, что ей дали
-TRIAGE_FLOOR = 30      # ниже — к дорогой модели не пускаем. Замер 2026-10-06
-                       # на 400 вакансиях: у всех, кому Sonnet поставил 70 и
-                       # выше, балл триажа не опускался ниже 30. Выше ставить
-                       # нельзя — на 40 теряются 4 подходящие вакансии из 76
-TRIAGE_CHARS = 3000    # медиана первого упоминания стека — 1286-й символ
 RESCORE_TOP = 20       # сколько вакансий истории дооценивать после смены
                        # профиля: не полный пересчёт, а верхушка по баллу
                        # дешёвой модели. Замеры 2026-10-06: Sonnet на всю
                        # историю это $2.40, на верхушку — пять центов
 
-TRIAGE_SYSTEM = """Ты отбираешь вакансии для кандидата перед дорогой оценкой.
+# --- теги: роль, стек, домен -------------------------------------------------
+# Заменили триаж. Замер 2026-10-12 (docs/scaling.md): один ярлык на вакансию
+# теряет две трети подходящих, три ролевых тега держат полноту 100% при объёме
+# 55%. Поэтому тегов несколько, ролевые — условие, стековые — только вес в
+# очереди: список технологий самое шумное поле паспорта, и жёсткое условие на
+# нём роняет полноту до 68%.
 
-Смотри ТОЛЬКО на три вещи: профессия, стек и грейд. Географию не оценивай
-вообще — её уже проверили до тебя, локацию игнорируй.
+ROLE_RX = {
+    "backend": r"backend|back-end|software engineer|server-side|\bapi\b|micro-?service",
+    "frontend": r"frontend|front-end|\breact\b|\bangular\b",
+    "fullstack": r"full-?stack",
+    "mobile": r"\bios\b|android|mobile engineer|flutter",
+    "platform": r"platform|infrastructure|cloud engineer",
+    "devops-sre": r"\bsre\b|site reliability|devops|reliability engineer",
+    "data-engineer": r"data engineer|analytics engineer|\betl\b|data platform",
+    "data-scientist": r"data scientist|research scientist",
+    "ml-engineer": r"\bml\b|machine learning|\bai\b engineer|mlops",
+    "analyst-business": r"business analyst|systems? analyst|бизнес-аналитик",
+    "analyst-data": r"data analyst|\banalytics\b",
+    "analyst-product": r"product analyst|product owner",
+    "architect": r"architect",
+    "security": r"security|appsec|infosec",
+    "qa": r"\bqa\b|quality assurance|test engineer|sdet",
+    "pm": r"product manager|project manager|program manager|delivery manager",
+    # Заведомо чужие профессии тоже получают тег: иначе вакансия остаётся без
+    # тегов, читается как «не знаю» и доходит до платного паспорта. Замер
+    # 2026-10-12: без этих строк 72% открытых вакансий шли дальше без решения.
+    "sales": r"account executive|account manager|sales|business development|bdr|sdr",
+    "support": r"customer success|support engineer|technician|helpdesk|service desk",
+    "marketing": r"marketing|content writer|copywriter|seo|brand ",
+    "hr": r"recruiter|talent acquisition|people partner|hr",
+    "finance": r"accountant|controller|financial analyst|payroll|treasury",
+    "designer": r"designer|ux|ui designer|motion",
+    "legal": r"legal counsel|lawyer|compliance officer|paralegal",
+}
+# Синоним технологии -> тег. Словарь закрытый намеренно: свободные теги
+# дрейфуют от вызова к вызову, и «Python 3» против «Python» ломает подбор.
+STACK_SYN = {
+    "python": "python", "go": "go", "golang": "go", "java": "java",
+    "kotlin": "jvm", "scala": "jvm", "rust": "rust", "node": "node",
+    "node.js": "node", "nodejs": "node", "typescript": "node",
+    "javascript": "node", "ruby": "ruby", "php": "php", "c#": "dotnet",
+    ".net": "dotnet", "kubernetes": "k8s", "k8s": "k8s", "docker": "k8s",
+    "helm": "k8s", "terraform": "iac", "ansible": "iac", "aws": "aws",
+    "gcp": "gcp", "google cloud": "gcp", "azure": "azure", "sql": "sql",
+    "postgres": "sql", "postgresql": "sql", "mysql": "sql", "oracle": "sql",
+    "clickhouse": "olap", "snowflake": "olap", "bigquery": "olap",
+    "spark": "bigdata", "airflow": "bigdata", "dbt": "bigdata",
+    "kafka": "kafka", "rabbitmq": "kafka", "elasticsearch": "search",
+    "mongodb": "nosql", "redis": "nosql", "grpc": "grpc", "rest": "rest",
+    "graphql": "rest", "uml": "modeling", "bpmn": "modeling",
+}
+TAG_KINDS = ("role", "stack", "domain")
 
-Верни JSON: {"scores": [{"url": "...", "pct": 0-100}]}
-pct — насколько вакансия профессионально близка кандидату:
-- 0 — другая профессия;
-- 1-30 — та же область, но стек и задачи не те;
-- 31-60 — смежная роль или частичное совпадение стека;
-- 61-100 — профессия и стек совпадают.
 
-Соседние профессии считаются своими: для аналитика это product manager,
-product owner, solution architect; для бэкенда — platform, infrastructure, SRE.
-
-Грейд: junior и стажировки — 0, но только если в профиле не сказано, что
-кандидат их рассматривает. Middle и выше штрафом не считается.
-Технология из раздела «будет плюсом» весит меньше обязательной.
-
-Оценивай каждую присланную вакансию, порядок сохраняй. Только JSON."""
+def stack_tags(words):
+    """Технологии -> теги по закрытому словарю. Границы обязательны: иначе
+    «go» находится внутри «mongodb», а «rest» внутри «forest»."""
+    txt = " " + " ".join(re.sub(r"[^a-z0-9+#.]", " ", str(w or "").lower())
+                         for w in words) + " "
+    return {tag for word, tag in STACK_SYN.items()
+            if re.search(r"(?<![a-z0-9])" + re.escape(word) + r"(?![a-z0-9])", txt)}
 
 
-def triage(profile, rows):
-    """Балл по профессии и стеку дешёвой моделью. Возвращает (прошедшие, баллы).
+def role_tags(text):
+    low = str(text or "").lower()
+    return {tag for tag, rx in ROLE_RX.items() if re.search(rx, low)}
 
-    Невернувшиеся проходят дальше: молчание модели — это «не знаю», а не ноль,
-    и терять из-за него вакансию дороже, чем оценить лишнюю."""
-    import llm
-    listing = "\n\n".join(
-        f'{i+1}. url={u}\n   {t}\n   {(d or "")[:TRIAGE_CHARS]}'
-        for i, (u, _, t, _, d) in enumerate(rows))
-    short = {k: profile.get(k) for k in ("role", "level", "stack", "domains", "looking_for")}
-    out = llm.ask_json(
-        TRIAGE_SYSTEM,
-        "ПРОФИЛЬ: " + json.dumps(short, ensure_ascii=False) + f"\n\nВАКАНСИИ:\n{listing}",
-        model=llm.TRIAGE_MODEL, max_tokens=2000)
-    known = {r[0] for r in rows}
-    seen = {x.get("url"): int(x.get("pct") or 0)
-            for x in out.get("scores", []) if x.get("url") in known}
-    return [r for r in rows if seen.get(r[0], TRIAGE_FLOOR) >= TRIAGE_FLOOR], seen
+
+def job_tags(title, psp=None):
+    """Теги вакансии. Роль берём и из названия, и из паспорта: модель, выбирая
+    один ярлык, предпочитает привкус основе — «Senior Software Engineer
+    (Backend) — AI/ML» она помечает как ml-engineer."""
+    tags = {"role": role_tags(title), "stack": stack_tags([title]), "domain": set()}
+    if psp:
+        if psp.get("role") in ROLE_RX:
+            tags["role"].add(psp["role"])
+        tags["stack"] |= stack_tags((psp.get("must") or []) + (psp.get("nice") or []))
+        tags["domain"] = {d.strip().lower() for d in (psp.get("domains") or []) if d}
+    return tags
+
+
+# Соседние роли, которые добавляем к подписке по умолчанию. Замер 2026-10-12:
+# одна роль backend находит 15 подходящих из 19, та же роль вместе с platform и
+# devops-sre — все 19. Доски называют одно и то же разными словами, и человек
+# не обязан об этом знать.
+ROLE_NEIGHBOURS = {
+    "backend": {"platform", "devops-sre"},
+    "platform": {"backend", "devops-sre"},
+    "devops-sre": {"platform", "backend"},
+    "data-engineer": {"analyst-data", "ml-engineer", "platform"},
+    "data-scientist": {"ml-engineer", "analyst-data"},
+    "ml-engineer": {"data-engineer", "data-scientist"},
+    "analyst-business": {"analyst-product", "architect", "analyst-data"},
+    "analyst-data": {"analyst-product", "data-engineer"},
+    "analyst-product": {"analyst-business", "analyst-data"},
+    "fullstack": {"backend", "frontend"},
+    "frontend": {"fullstack"},
+}
+
+
+def profile_tags(profile):
+    """Теги профиля по умолчанию: роль из должности плюс соседние, стек из
+    списка технологий. Соседей человек всегда может снять через /tags."""
+    roles = role_tags(profile.get("role"))
+    roles |= {n for r in roles for n in ROLE_NEIGHBOURS.get(r, ())}
+    return {"role": roles,
+            "stack": stack_tags(profile.get("stack") or []),
+            "domain": {str(d).strip().lower()
+                       for d in (profile.get("domains") or []) if d}}
+
+
+def get_tags(conn, tg_id, profile=None):
+    """Подписка пользователя. Пустую выводим из профиля и запоминаем: человек
+    должен видеть, по каким тегам ему присылают, и мочь их поправить."""
+    rows = conn.execute("SELECT tag, kind FROM profile_tags WHERE tg_id=?",
+                        (tg_id,)).fetchall()
+    if not rows:
+        profile = profile if profile is not None else get_profile(conn, tg_id)
+        if not profile:
+            return {k: set() for k in TAG_KINDS}
+        tags = profile_tags(profile)
+        set_tags(conn, tg_id, tags)
+        return tags
+    out = {k: set() for k in TAG_KINDS}
+    for tag, kind in rows:
+        out.setdefault(kind, set()).add(tag)
+    return out
+
+
+def set_tags(conn, tg_id, tags):
+    conn.execute("DELETE FROM profile_tags WHERE tg_id=?", (tg_id,))
+    conn.executemany("INSERT OR REPLACE INTO profile_tags(tg_id,tag,kind) VALUES(?,?,?)",
+                     [(tg_id, t, kind) for kind in TAG_KINDS for t in tags.get(kind, ())])
+    conn.commit()
+
+
+def tag_weight(mine, theirs):
+    """Насколько вакансия ближе прочих внутри подписки. Только порядок очереди:
+    отказов по стеку нет, он слишком шумный."""
+    return (2 * len(mine["role"] & theirs["role"])
+            + len(mine["stack"] & theirs["stack"])
+            + len(mine["domain"] & theirs["domain"]))
 
 
 def score_batch(profile, rows):
@@ -377,8 +473,10 @@ def spread(conn, tg_id, url, pct, why, profile=None, triage_pct=None):
         "SELECT url, title, location FROM jobs WHERE dedup = "
         "(SELECT dedup FROM jobs WHERE url = ?) AND closed_at IS NULL", (url,)).fetchall()
     profile = profile if profile is not None else get_profile(conn, tg_id)
+    psps = get_passports(conn, [u for u, *_ in rows]) if (pct and profile) else {}
     for u, title, loc in rows:
-        blocked = gate_reason(profile, title, loc) if (pct and profile) else None
+        blocked = (gate_reason(profile, title, loc, psps.get(u))
+                   if (pct and profile) else None)
         conn.execute("INSERT OR REPLACE INTO matches"
                      "(tg_id, job_url, pct, why, scored_at, triage_pct) VALUES(?,?,?,?,?,?)",
                      (tg_id, u, 0 if blocked else pct, blocked or why, now(), triage_pct))
@@ -438,11 +536,14 @@ def allowed_places(profile):
     return re.compile("|".join(own + [SUPRA, EUROPE]), re.I)
 
 
-def gate_reason(profile, title, location):
+def gate_reason(profile, title, location, psp=None):
     """Почему вакансию можно отбросить без моделей. None — пропускаем дальше.
 
     Причина возвращается с найденным словом: молчаливый отказ не отследить при
-    ручном разборе, а им мы ловим ошибки фильтров."""
+    ручном разборе, а им мы ловим ошибки фильтров.
+
+    psp — паспорт вакансии, если он уже построен. Поле локации с доски бывает
+    пустым или врёт, паспорт читает страну найма из текста."""
     if str(profile.get("level", "")).lower() in SENIOR_LEVELS:
         m = LOW_GRADE.search(title or "")
         if m:
@@ -453,7 +554,188 @@ def gate_reason(profile, title, location):
         m = PLACES.search(loc)
         if m and not ok.search(loc):
             return f"локация «{m.group(0)}», подходящих мест в строке нет"
+    return passport_block(profile, psp) if psp else None
+
+
+# --- паспорт вакансии: блокеры из текста ------------------------------------
+# Строится один раз на вакансию дешёвой моделью и годится всем пользователям.
+# Отвечает на три вопроса, на которые поле локации не отвечает: откуда можно
+# нанимать, обязателен ли офис, какие грейды допускает текст. Замер 2026-10-12
+# (docs/scaling.md): извлечение этих полей дешёвой моделью не уступает дорогой.
+
+PASSPORT_BATCH = 10
+PASSPORT_CHARS = 6000   # страна найма часто в конце: «This role is US-based»
+EU_CODES = {"PT","ES","FR","DE","NL","PL","IT","CZ","SE","DK","NO","FI","CH","AT",
+            "BE","IE","GB","UK","GR","RO","BG","EE","LV","LT","HU","HR","SK","SI",
+            "RS","CY","MT","LU","IS","UA","MD","AL","MK","ME","BA"}
+SUPRA_CODES = {"EU","EUROPE","EMEA","WORLDWIDE","ANYWHERE","GLOBAL"}
+HOME_CITIES = ("porto", "oporto", "matosinhos", "gaia", "lisbo")
+
+PASSPORT_SYSTEM = """Ты извлекаешь из текста вакансии три вещи и больше ничего:
+откуда можно нанимать, в каком формате работа, какие грейды допускает текст.
+
+Главное правило: НЕ СКАЗАНО — ЗНАЧИТ ПУСТО. Ничего не достраивай по названию
+должности, по стране компании или по здравому смыслу. Выдумка хуже пустого поля.
+Поле локации с доски — слабый источник: если текст ему противоречит, верь тексту
+и назови это поле в uncertain.
+
+Верни JSON: {"items": [{"url": "...", "hire": [...], "work_mode": "...",
+"office_city": "...", "levels": [...], "role": "...", "must": [...],
+"nice": [...], "domains": [...], "uncertain": [...]}]}
+
+hire — откуда компания может нанять человека, а не где стоит офис. ISO-коды
+стран (PT, ES, DE, US, IN), либо EU, EUROPE, EMEA, WORLDWIDE, AMERICAS, APAC,
+LATAM. «Remote (US only)» → ["US"]. «Remote, Europe» → ["EUROPE"]. Просто
+«Remote» без уточнения → [].
+work_mode — remote, hybrid, onsite или not-stated. onsite и hybrid ставь
+ТОЛЬКО если в тексте есть прямые слова: on-site, in office, X days a week,
+relocation required, hybrid. Отсутствие слова remote основанием не является:
+город в шапке вакансии сам по себе ничего не говорит о формате — это
+not-stated. Это самая частая ошибка, не делай её.
+office_city — город офиса, если hybrid или onsite, иначе пустая строка.
+levels — какие грейды допускает текст: intern, junior, middle, senior, lead,
+staff, principal. Грейд не назван — пустой список.
+role — одно слово из списка: backend, frontend, fullstack, mobile, platform,
+devops-sre, data-engineer, data-scientist, ml-engineer, analyst-business,
+analyst-data, analyst-product, architect, security, qa, pm, designer, sales,
+marketing, support, hr, finance, other. Бери суть роли, а не привкус: «Senior
+Software Engineer (Backend) — AI/ML» это backend, а не ml-engineer.
+must — обязательные технологии и инструменты, как названы в тексте.
+nice — желательные, из раздела «будет плюсом». Разделения нет — всё в must.
+domains — чем занимается продукт, по-английски и коротко: fintech, banking,
+cloud, mlops, healthtech, ecommerce, gamedev, adtech, logistics, telecom,
+govtech, edtech, security, data-platform, consulting.
+uncertain — имена полей, в которых ты не уверен.
+
+Оценивай каждую присланную вакансию, порядок сохраняй. Только JSON."""
+
+
+def passport_prompt(rows):
+    """rows: [(url, title, location, description)] -> текст запроса."""
+    return "ВАКАНСИИ:\n" + "\n\n".join(
+        f'{i+1}. url={u}\n   {t}\n   локация (поле): {loc or "не указана"}\n'
+        f'   {(d or "")[:PASSPORT_CHARS]}'
+        for i, (u, t, loc, d) in enumerate(rows))
+
+
+def parse_passports(out, known):
+    """Ответ модели -> строки для базы. Чужие url отбрасываем."""
+    rows = []
+    for x in (out or {}).get("items", []):
+        u = x.get("url")
+        if u not in known:
+            continue
+        join = lambda key: ",".join(
+            str(v).strip().lower() for v in (x.get(key) or []) if str(v).strip())
+        rows.append((u,
+                     ",".join(str(h).upper().strip() for h in (x.get("hire") or [])),
+                     str(x.get("work_mode") or "not-stated").lower(),
+                     str(x.get("office_city") or "").lower(),
+                     join("levels"), join("uncertain"),
+                     str(x.get("role") or "").strip().lower(),
+                     join("must"), join("nice"), join("domains")))
+    return rows
+
+
+def ensure_passports(conn, rows):
+    """Достраивает паспорта для тех вакансий из rows, у которых их ещё нет.
+
+    rows: [(url, company, title, location, description)] — как их отдаёт
+    score_pending. Паспорт один на вакансию и общий для всех пользователей,
+    поэтому второй профиль за него уже не платит."""
+    import llm
+    have = {u for (u,) in conn.execute("SELECT url FROM passports")}
+    todo = [(r[0], r[2], r[3], r[4]) for r in rows if r[0] not in have]
+    made = 0
+    for i in range(0, len(todo), PASSPORT_BATCH):
+        part = todo[i:i + PASSPORT_BATCH]
+        try:
+            out = llm.ask_json(PASSPORT_SYSTEM, passport_prompt(part),
+                               model=llm.TRIAGE_MODEL, max_tokens=3000)
+        except Exception as e:
+            log("passport-error", repr(e))
+            continue
+        got = parse_passports(out, {u for u, *_ in part})
+        conn.executemany(
+            "INSERT OR REPLACE INTO passports"
+            "(url,hire,work_mode,office_city,levels,uncertain,role,must,nice,"
+            "domains,made_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            [r + (now(),) for r in got])
+        conn.commit()
+        made += len(got)
+    if made:
+        log("passports", made)
+    return made
+
+
+def get_passports(conn, urls):
+    """Паспорта пачкой: {url: dict}. Пустая пачка — пустой словарь."""
+    out = {}
+    for u in urls:
+        r = conn.execute("SELECT hire, work_mode, office_city, levels, uncertain,"
+                         " role, must, nice, domains FROM passports WHERE url=?",
+                         (u,)).fetchone()
+        if r:
+            split = lambda v: [x for x in (v or "").split(",") if x]
+            out[u] = {"hire": split(r[0]),
+                      "work_mode": r[1] or "not-stated",
+                      "office_city": r[2] or "",
+                      "levels": split(r[3]),
+                      "uncertain": split(r[4]),
+                      "role": r[5] or "",
+                      "must": split(r[6]), "nice": split(r[7]),
+                      "domains": split(r[8])}
+    return out
+
+
+def passport_block(profile, psp):
+    """Блокер по паспорту или None. «Не знаю» — не блокер, это осознанно:
+    ложный отказ стоит дороже лишней оценки (замер в docs/scaling.md)."""
+    if allowed_places(profile) is None:      # готов переехать — география не блокер
+        return None
+    unc = set(psp.get("uncertain") or [])
+    hire = {h for h in (psp.get("hire") or []) if h}
+    # Свои коды — европейские: профиль живёт в Португалии и её не покидает.
+    if hire and "hire" not in unc and not (hire & (EU_CODES | SUPRA_CODES)):
+        return f"страна найма {', '.join(sorted(hire))[:40]}, по тексту вакансии"
+    mode = psp.get("work_mode") or "not-stated"
+    city = psp.get("office_city") or ""
+    home = any(h in city for h in HOME_CITIES)
+    if "work_mode" not in unc:
+        # Без названного города «onsite» — это догадка извлекателя, а не факт:
+        # замер 2026-10-12 показал, что дешёвая модель так помечает вакансии,
+        # где просто не сказано про формат.
+        if mode == "onsite" and city and not home:
+            return "офис обязателен, по тексту вакансии"
+        # Гибрид в чужом городе — блокер даже для того, кто гибрид любит: ездить
+        # туда он всё равно не будет. Город не назван — не знаем, пропускаем.
+        if mode == "hybrid" and city:
+            if not home:
+                return f"гибрид в «{city[:30]}», по тексту вакансии"
+            if not re.search(r"\b(да|yes)\b|готов", str(profile.get("hybrid", "")).lower()):
+                return "гибрид, профиль его не рассматривает"
+    lv = {l for l in (psp.get("levels") or []) if l}
+    if (lv and "levels" not in unc and lv <= {"intern", "junior"}
+            and str(profile.get("level", "")).lower() in SENIOR_LEVELS):
+        return f"грейд {', '.join(sorted(lv))}, профиль от senior"
     return None
+
+
+def gate_audit(conn, tg_id, limit=200):
+    """Что ворота отбрасывают прямо сейчас, с причиной. Заменяет собой хранимые
+    нули: отказ воспроизводится на лету и всегда соответствует текущему профилю,
+    а не тому, каким он был в день записи."""
+    profile = get_profile(conn, tg_id) or {}
+    rows = conn.execute("""
+        SELECT j.url, j.company, j.title, j.location FROM jobs j
+        WHERE j.closed_at IS NULL GROUP BY j.dedup""").fetchall()
+    psps = get_passports(conn, [r[0] for r in rows])
+    out = []
+    for url, company, title, loc in rows:
+        why = gate_reason(profile, title, loc, psps.get(url))
+        if why:
+            out.append((url, company, title, why))
+    return out[:limit]
 
 
 def backlog_pass(conn, tg_id):
@@ -471,35 +753,24 @@ def backlog_pass(conn, tg_id):
         LEFT JOIN matches m ON m.job_url = j.url AND m.tg_id = ?
         WHERE m.job_url IS NULL AND j.closed_at IS NULL
         GROUP BY j.dedup""", (tg_id,)).fetchall()
-    kept = []
-    for r in rows:
-        why = gate_reason(profile, r[2], r[3])
-        if why:
-            spread(conn, tg_id, r[0], 0, why, profile=profile)
-        else:
-            kept.append(r)
-    conn.commit()
-    scores = {}
-    for i in range(0, len(kept), TRIAGE_BATCH):
-        part = kept[i:i + TRIAGE_BATCH]
-        try:
-            _, got = triage(profile, part)
-        except Exception as e:
-            log("triage-error", tg_id, repr(e))
-            got = {}
-        scores.update(got)
-    # Молчание модели в доборке читаем как ноль, а не как «не знаю»: здесь
-    # пропуск стоит вызова дорогой модели, а вакансия всё равно не свежая.
-    ranked = sorted(kept, key=lambda r: (scores.get(r[0], 0), r[0]), reverse=True)
+    # Ворота строк не оставляют: следующий проход повторит их бесплатно.
+    kept = [r for r in rows if not gate_reason(profile, r[2], r[3])]
+    # Порядок — по совпадению тегов: бесплатно и детерминированно. Паспортов у
+    # истории обычно нет, поэтому теги берутся из названия, и этого хватает на
+    # ранжирование — оценивать всё равно будем только верхушку.
+    mine = get_tags(conn, tg_id, profile)
+    psps = get_passports(conn, [r[0] for r in kept])
+    weight = {r[0]: tag_weight(mine, job_tags(r[2], psps.get(r[0]))) for r in kept}
+    ranked = sorted(kept, key=lambda r: (weight[r[0]], r[0]), reverse=True)
     top = {r[0] for r in ranked[:RESCORE_TOP]}
     for r in ranked:
         if r[0] not in top:
             spread(conn, tg_id, r[0], 0,
-                   f"история: балл триажа {scores.get(r[0], 0)}, не в верхушке",
-                   profile=profile, triage_pct=scores.get(r[0]))
+                   f"история: совпадение тегов {weight[r[0]]}, не в верхушке",
+                   profile=profile)
     conn.commit()
     log("backlog", tg_id, f"история {len(rows)}, к дорогой модели {len(top)}")
-    return {u: scores.get(u, 0) for u in top}
+    return top
 
 
 def inherit_scores(conn, tg_id, profile):
@@ -529,13 +800,12 @@ def inherit_scores(conn, tg_id, profile):
     return len(rows)
 
 
-def score_pending(conn, tg_id, limit=SCORE_SLICE, known_triage=None):
+def score_pending(conn, tg_id, limit=SCORE_SLICE, prefer=()):
     """Оценивает то, что для этого профиля ещё не оценено. Закрытые пропускаем:
     платить за оценку снятой вакансии незачем.
 
-    known_triage — вакансии, которые уже прошли триаж в доборке истории. Их не
-    гоняем через дешёвую модель второй раз: это не только лишняя пачка, но и
-    риск, что недетерминированная модель отсеет то, что сама же отобрала."""
+    prefer — вакансии, которые доборка истории уже отобрала в верхушку: их
+    ставим первыми, чтобы дорогая модель начала с них."""
     profile = get_profile(conn, tg_id)
     if not profile:
         return 0
@@ -543,56 +813,46 @@ def score_pending(conn, tg_id, limit=SCORE_SLICE, known_triage=None):
     inherit_scores(conn, tg_id, profile)
     # По одной вакансии из группы дублей: у Mozilla десять url на одну должность,
     # платить за неё десять раз незачем. Результат раскладывается на всю группу.
+    # Без LIMIT: отказ ворот в базу не пишется, поэтому отсеянные возвращаются
+    # сюда каждый проход. Срез берём уже после ворот, иначе он забивался бы
+    # одними и теми же отказами и новые вакансии не доходили бы до оценки.
     rows = conn.execute("""
         SELECT j.url, j.company, j.title, j.location, j.description FROM jobs j
         LEFT JOIN matches m ON m.job_url = j.url AND m.tg_id = ?
         WHERE m.job_url IS NULL AND j.closed_at IS NULL
         GROUP BY j.dedup
-        ORDER BY j.posted DESC NULLS LAST LIMIT ?""", (tg_id, limit)).fetchall()
-    # Ворота: география и грейд — до моделей, бесплатно.
-    passed, blocked = [], 0
-    for r in rows:
-        why = gate_reason(profile, r[2], r[3])
-        if why:
-            spread(conn, tg_id, r[0], 0, why)
-            blocked += 1
-        else:
-            passed.append(r)
-    if blocked:
-        conn.commit()
-        log("gate", tg_id, f"{blocked} из {len(rows)}")
+        ORDER BY j.posted DESC NULLS LAST""", (tg_id,)).fetchall()
+    # Ворота по строке локации и названию: бесплатно, на каждом проходе заново.
+    # Строки в matches они больше не оставляют — решение воспроизводится
+    # функцией за микросекунды, а 19% таблицы на нём не нужны.
+    maybe = [r for r in rows if not gate_reason(profile, r[2], r[3])][:limit]
+    # Паспорта — только на срез: вызов дешёвой модели на вакансию, общий для
+    # всех профилей. Поле локации пустое у каждой седьмой вакансии, и без
+    # паспорта ворота на ней молчат.
+    ensure_passports(conn, maybe)
+    psps = get_passports(conn, [r[0] for r in maybe])
+    passed = [r for r in maybe if not gate_reason(profile, r[2], r[3], psps.get(r[0]))]
+    if len(passed) != len(rows):
+        log("gate", tg_id, f"{len(passed)} из {len(rows)}")
     rows = passed
 
-    # Первый проход дешёвой моделью: отсеянным сразу ноль, без оплаты основной.
-    # Баллы копим по всем, включая прошедших: по ним калибруется порог, а
-    # внутри batch-цикла они теряются.
-    known_triage = known_triage or {}
-    survivors = [r for r in rows if r[0] in known_triage]
-    triage_pct = dict(known_triage)
-    todo = [r for r in rows if r[0] not in known_triage]
-    for i in range(0, len(todo), TRIAGE_BATCH):
-        part = todo[i:i + TRIAGE_BATCH]
-        scores = {}
-        try:
-            keep, scores = triage(profile, part)
-        except Exception as e:
-            log("triage-error", tg_id, repr(e))
-            keep = part                      # не смогли отсеять — оцениваем всё
-        survivors += keep
-        triage_pct.update(scores)
-        kept = {u for u, *_ in keep}
-        for row in part:
-            if row[0] not in kept:
-                spread(conn, tg_id, row[0], 0,
-                       f"профессия и стек мимо: предварительный балл {scores.get(row[0], 0)}",
-                       triage_pct=scores.get(row[0], 0))
-        # Коммит после каждой пачки: между вызовами модели проходят секунды, и
-        # незакрытая транзакция всё это время держит запись в базе — сборщик,
-        # рассылка и команды бота ждут её молча.
-        conn.commit()
+    # Отбор по тегам вместо дешёвой модели: бесплатно, детерминированно и
+    # объяснимо словами. Условие — общий ролевой тег; стек и домен только
+    # двигают вакансию в очереди. Строк в matches отказ не оставляет: решение
+    # воспроизводится на следующем проходе за микросекунды.
+    mine = get_tags(conn, tg_id, profile)
+    survivors = []
+    for r in rows:
+        theirs = job_tags(r[2], psps.get(r[0]))
+        # Тегов у вакансии нет вовсе — это «не знаю», а не «чужая»: паспорт мог
+        # не построиться, а название оказаться без узнаваемых слов.
+        if mine["role"] and theirs["role"] and not (mine["role"] & theirs["role"]):
+            continue
+        survivors.append((tag_weight(mine, theirs), r[0] in prefer, r))
     if len(rows) != len(survivors):
-        log("triage", tg_id, f"{len(survivors)} из {len(rows)}")
-    rows = survivors
+        log("tags", tg_id, f"{len(survivors)} из {len(rows)}")
+    # Сначала верхушка доборки, потом по совпадению тегов.
+    rows = [r for _, _, r in sorted(survivors, key=lambda x: (x[1], x[0]), reverse=True)]
 
     done, failed = 0, 0
     for i in range(0, len(rows), BATCH):
@@ -611,7 +871,7 @@ def score_pending(conn, tg_id, limit=SCORE_SLICE, known_triage=None):
         if len(scored) < len(chunk):
             log("score-short", tg_id, f"{len(scored)} из {len(chunk)}")
         for url, pct, why in scored:
-            spread(conn, tg_id, url, pct, why, triage_pct=triage_pct.get(url))
+            spread(conn, tg_id, url, pct, why)
         conn.commit()
         done += len(scored)
     if done:
@@ -660,7 +920,7 @@ def rescore(conn, tg_id):
 
     История не пересчитывается целиком: дорого и незачем. Снимаем оценки со
     всего, что ещё не отправляли, и помечаем это как доборку — дальше
-    score_pending прогонит их дешёвой моделью и дооценит дорогой только
+    score_pending отберёт их по тегам и дооценит дорогой моделью только
     верхушку по её баллу.
 
     Уже отправленное не трогаем: человек это видел, второй раз не придёт."""
@@ -903,6 +1163,32 @@ def cmd_profile(c):
         c.say("Профиля пока нет. Пришлите резюме файлом — дальше пять вопросов.")
 
 
+def cmd_tags(c):
+    """Показать подписку и поправить её словами: /tags +platform -qa."""
+    tags = get_tags(c.conn, c.tg_id)
+    if not tags["role"] and not c.arg:
+        return c.say("Профиля пока нет, теги появятся вместе с ним.")
+    if c.arg:
+        unknown = []
+        for word in c.arg.split():
+            tag = word.lstrip("+-").strip().lower()
+            if tag not in ROLE_RX:
+                unknown.append(tag)
+            elif word.startswith("-"):
+                tags["role"].discard(tag)
+            else:
+                tags["role"].add(tag)
+        set_tags(c.conn, c.tg_id, tags)
+        if unknown:
+            c.say("Не знаю таких ролей: " + ", ".join(unknown) +
+                  "\nДоступные: " + ", ".join(sorted(ROLE_RX)))
+    c.say("<b>Роли:</b> " + (", ".join(sorted(tags["role"])) or "любые") +
+          "\n<b>Стек:</b> " + (", ".join(sorted(tags["stack"])) or "—") +
+          "\n<b>Домены:</b> " + (", ".join(sorted(tags["domain"])) or "—") +
+          "\n\nРоли решают, что попадёт в ленту. Стек и доменыдвигают вакансию "
+          "выше в очереди.\nПоправить: <code>/tags +platform -qa</code>", html=True)
+
+
 def cmd_cv(c):
     c.say("Пришлите файл резюме следующим сообщением.")
 
@@ -976,6 +1262,7 @@ def cmd_revoke(c):
 
 
 HANDLERS = {"/start": cmd_help, "/help": cmd_help, "/profile": cmd_profile, "/cv": cmd_cv,
+            "/tags": cmd_tags,
             "/settings": cmd_settings, "/add": cmd_add, "/edit": cmd_edit,
             "/pause": cmd_pause, "/resume": cmd_resume}
 ADMIN_HANDLERS = {"/invite": cmd_invite, "/users": cmd_users, "/revoke": cmd_revoke}
@@ -1080,6 +1367,7 @@ COMMANDS = [
     ("profile", "как я понял ваш профиль"),
     ("cv", "прислать новое резюме"),
     ("edit", "поправить профиль словами"),
+    ("tags", "по каким тегам приходят вакансии"),
     ("add", "добавить компанию в отслеживание"),
     ("settings", "частота уведомлений и порог совпадения"),
     ("pause", "остановить уведомления"),
@@ -1130,7 +1418,7 @@ def score_once():
                 conn.execute("DELETE FROM meta WHERE key=?", (backlog_key(tg_id),))
                 conn.commit()
                 known = backlog_pass(conn, tg_id)
-            score_pending(conn, tg_id, known_triage=known)
+            score_pending(conn, tg_id, prefer=known)
     except Exception as e:
         log("scorer-error", repr(e))
     finally:

@@ -16,6 +16,7 @@ Self-hosted, long-polling (no public URL or webhook needed), SQLite for state.
 | `/profile` | how the bot understood you, with buttons |
 | `/cv` | send a new CV, profile is rebuilt |
 | `/edit <text>` | fix the profile in plain words: "I'd consider hybrid in Lisbon" |
+| `/tags` | which role tags bring you openings; `/tags +platform -qa` to edit |
 | `/add <link or name>` | track a company: it finds the job board itself |
 | `/settings` | match threshold and delivery mode, as buttons |
 | `/pause`, `/resume` | mute and unmute |
@@ -64,7 +65,10 @@ that access is invite-only: `/invite` mints a code that lives 48 hours.
 ## Cost
 
 The model is called twice: once to build a profile, then in batches of twenty
-to score new openings. At a typical load — fifty new openings a day — that is
+to score new openings. A cheap model also reads every new opening once to
+extract its passport: hiring countries, work mode, grade, stack and domain.
+Selection itself is free — role tags decide who sees an opening, and the gates
+drop a foreign country or grade without any model at all. At a typical load — fifty new openings a day — that is
 about **$3/month** on Claude Sonnet 5 through OpenRouter. Cheaper models work
 too; swap `OPENROUTER_MODEL`, see `.env.example` for figures.
 

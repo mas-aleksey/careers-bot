@@ -166,37 +166,6 @@ def test_score_prompt_allows_middle():
     assert "Middle и middle+" in bot.SCORE_SYSTEM
 
 
-TRIAGE_ROWS = [("u1", "Co", "Senior Backend Engineer", "Porto", "Python, Kafka"),
-               ("u2", "Co", "Retail Account Manager", "Porto", "продажи"),
-               ("u3", "Co", "Staff Platform Engineer", "Porto", "Go, k8s")]
-
-
-def test_triage_keeps_by_score_and_passes_silence(monkeypatch):
-    """Невернувшаяся вакансия идёт дальше: молчание модели — «не знаю», не ноль."""
-    monkeypatch.setattr(bot, "TRIAGE_FLOOR", 15)
-    import llm
-    monkeypatch.setattr(llm, "ask_json", lambda *a, **k: {"scores": [
-        {"url": "u1", "pct": 80}, {"url": "u2", "pct": 0}]})
-    keep, scores = bot.triage({"role": "backend"}, TRIAGE_ROWS)
-    assert [r[0] for r in keep] == ["u1", "u3"]   # u3 модель не вернула — пропущен
-    assert scores == {"u1": 80, "u2": 0}
-
-
-def test_triage_sends_description_slice(monkeypatch):
-    """Стек в тексте впервые встречается около 1286-го символа — заголовка мало."""
-    seen = {}
-    import llm
-
-    def fake(system, user, **kw):
-        seen["user"] = user
-        return {"scores": []}
-
-    monkeypatch.setattr(llm, "ask_json", fake)
-    bot.triage({"role": "backend"}, TRIAGE_ROWS)
-    assert "Python, Kafka" in seen["user"]
-    assert "Porto" not in seen["user"]            # локация триажу не нужна
-
-
 SCORE_ROWS = [("u1", "BNP", "Senior Python Developer", "", "Python, SQL, Portugal, hybrid")]
 
 
@@ -292,8 +261,8 @@ def test_rescore_spares_what_was_already_sent():
 
 
 def test_backlog_pass_pays_only_for_the_top(monkeypatch):
-    """Верхушка идёт к дорогой модели, остальным сразу ноль с баллом триажа —
-    иначе обычный цикл подберёт их как неоценённые и заплатит за каждую."""
+    """Верхушка идёт к дорогой модели, остальным сразу ноль с числом совпавших
+    тегов — иначе обычный цикл подберёт их как неоценённые и заплатит за каждую."""
     import storage, llm
     monkeypatch.setattr(bot, "RESCORE_TOP", 2)
     conn = storage.connect()
@@ -305,23 +274,30 @@ def test_backlog_pass_pays_only_for_the_top(monkeypatch):
                      "first_seen,dedup,description) VALUES(?,'Acme',?,'Porto','lever',"
                      "'2026-10-01',?,'текст')", (f"https://j/{i}", title, f"d{i}"))
     conn.commit()
-    monkeypatch.setattr(llm, "ask_json", lambda *a, **k: {"scores": [
-        {"url": "https://j/0", "pct": 90}, {"url": "https://j/1", "pct": 70},
-        {"url": "https://j/2", "pct": 40}, {"url": "https://j/3", "pct": 10}]})
+    # соседние тесты пишут в ту же базу: закрываем им очередь, чтобы верхушка
+    # считалась только по четырём вакансиям этого теста
+    conn.execute("INSERT OR REPLACE INTO matches(tg_id,job_url,pct,why,scored_at) "
+                 "SELECT 8, url, 0, 'чужая', '2026-10-06' FROM jobs "
+                 "WHERE url NOT IN ('https://j/0','https://j/1','https://j/2','https://j/3')")
+    # Профиль на Go и Python: верхушку определяют теги, модель не зовут вовсе
+    conn.execute("UPDATE profiles SET data=? WHERE tg_id=8",
+                 ('{"level":"senior","relocation":"да","role":"Senior Backend",'
+                  '"stack":["Go","Python"]}',))
+    conn.commit()
+    monkeypatch.setattr(llm, "ask_json", lambda *a, **k: 1/0)   # вызов = падение
     known = bot.backlog_pass(conn, 8)
-    assert known == {"https://j/0": 90, "https://j/1": 70}
+    assert known == {"https://j/0", "https://j/1"}
     # в базе лежат и чужие вакансии от соседних тестов — смотрим только свои
     got = dict(conn.execute("SELECT job_url, pct FROM matches WHERE tg_id=8 "
                             "AND job_url IN ('https://j/0','https://j/1',"
                             "'https://j/2','https://j/3')"))
     assert got == {"https://j/2": 0, "https://j/3": 0}    # верхушка пока без оценки
-    assert conn.execute("SELECT triage_pct FROM matches WHERE job_url='https://j/2'"
-                        ).fetchone()[0] == 40
+    assert "совпадение тегов" in conn.execute(
+        "SELECT why FROM matches WHERE job_url='https://j/2'").fetchone()[0]
 
 
 def test_score_pending_trusts_backlog_scores(monkeypatch):
-    """Верхушка доборки не проходит триаж второй раз: лишняя пачка плюс риск,
-    что модель отсеет то, что сама же отобрала."""
+    """Верхушка доборки идёт к дорогой модели первой, не проходя отбор заново."""
     import storage, llm
     conn = storage.connect()
     conn.execute("INSERT OR REPLACE INTO profiles(tg_id,data,updated_at) VALUES"
@@ -338,44 +314,18 @@ def test_score_pending_trusts_backlog_scores(monkeypatch):
     seen = []
 
     def fake_ask(system, user, **kw):
-        seen.append("триаж" if system is bot.TRIAGE_SYSTEM else "sonnet")
-        return {"scores": [{"url": "https://k/1", "pct": 91, "why": "подходит"}]}
+        seen.append("паспорт" if system is bot.PASSPORT_SYSTEM else "sonnet")
+        return {"scores": [{"url": "https://k/1", "pct": 91, "why": "подходит"}],
+                "items": [{"url": "https://k/1", "work_mode": "remote",
+                           "role": "backend"}]}
 
     monkeypatch.setattr(llm, "ask_json", fake_ask)
     monkeypatch.setattr(bot, "SCORE_SLICE", 50)
-    bot.score_pending(conn, 11, known_triage={"https://k/1": 85})
-    assert seen == ["sonnet"]                  # дешёвую модель не звали вовсе
-    row = conn.execute("SELECT pct, triage_pct FROM matches "
-                       "WHERE job_url='https://k/1'").fetchone()
-    assert row == (91, 85)
-
-
-def test_score_pending_stores_triage_score_for_both_sides(monkeypatch):
-    """Балл дешёвой модели нужен и у прошедших: без пары «триаж, Sonnet»
-    порог для переоценки истории не на чем калибровать."""
-    import storage, llm
-    conn = storage.connect()
-    conn.execute("INSERT OR REPLACE INTO profiles(tg_id,data,updated_at) "
-                 "VALUES(9,'{\"level\":\"senior\",\"relocation\":\"да\"}','2026-10-06')")
-    for url, title in (("https://j/keep", "Senior Backend Engineer"),
-                       ("https://j/drop", "Retail Account Manager")):
-        conn.execute("INSERT OR REPLACE INTO jobs(url,company,title,location,source,"
-                     "first_seen,dedup,description) VALUES(?,'Acme',?,'Porto','lever',"
-                     "'2026-10-01',?,'Python, Kafka')", (url, title, url))
-    conn.commit()
-
-    def fake_ask(system, user, **kw):
-        if system is bot.TRIAGE_SYSTEM:
-            return {"scores": [{"url": "https://j/keep", "pct": 62},
-                               {"url": "https://j/drop", "pct": 5}]}
-        return {"scores": [{"url": "https://j/keep", "pct": 88, "why": "подходит"}]}
-
-    monkeypatch.setattr(llm, "ask_json", fake_ask)
-    bot.score_pending(conn, 9)
-    got = dict(conn.execute("SELECT job_url, triage_pct FROM matches WHERE tg_id=9"))
-    assert got == {"https://j/keep": 62, "https://j/drop": 5}
-    assert conn.execute("SELECT pct FROM matches WHERE job_url='https://j/keep'"
-                        ).fetchone()[0] == 88
+    bot.score_pending(conn, 11, prefer={"https://k/1"})
+    # дешёвая модель зовётся один раз и только за паспортом, триажа больше нет
+    assert seen == ["паспорт", "sonnet"]
+    assert conn.execute("SELECT pct FROM matches WHERE job_url='https://k/1'"
+                        ).fetchone()[0] == 91
 
 
 def test_collect_due_counts_from_last_check_not_from_start():
@@ -486,3 +436,204 @@ def test_health_counts_vacancies_not_rows():
     assert "+2 вакансий · закрылось 1 · вернулось 1" in text
     # разбор по компаниям считает теми же правилами, что и шапка
     assert "· Acme: +2 / −1" in text
+
+
+# --- паспорт вакансии: блокеры из текста ------------------------------------
+
+def psp(**kw):
+    base = {"hire": [], "work_mode": "not-stated", "office_city": "",
+            "levels": [], "uncertain": []}
+    return dict(base, **kw)
+
+
+def test_passport_cuts_foreign_hiring_when_field_is_empty():
+    """Дыра, из-за которой 2026-10-04 выпали Mozilla и BNP: страна только в тексте."""
+    assert not bot.gate_reason(SENIOR, "Senior Backend Engineer", "")
+    assert bot.gate_reason(SENIOR, "Senior Backend Engineer", "", psp(hire=["US"]))
+    assert bot.gate_reason(SENIOR, "Senior Backend Engineer", "Remote",
+                           psp(hire=["AMERICAS"]))
+
+
+def test_passport_keeps_europe_and_supranational():
+    for h in (["PT"], ["EUROPE"], ["EMEA"], ["WORLDWIDE"], ["US", "DE"]):
+        assert not bot.gate_reason(SENIOR, "Senior Backend Engineer", "", psp(hire=h))
+
+
+def test_passport_silent_when_unsure_or_empty():
+    """«Не знаю» — не блокер: ложный отказ дороже лишней оценки."""
+    assert not bot.gate_reason(SENIOR, "Senior Backend Engineer", "", psp(hire=[]))
+    assert not bot.gate_reason(SENIOR, "Senior Backend Engineer", "",
+                               psp(hire=["US"], uncertain=["hire"]))
+    assert not bot.gate_reason(SENIOR, "Senior Backend Engineer", "",
+                               psp(work_mode="onsite", uncertain=["work_mode"]))
+
+
+def test_passport_work_mode():
+    assert bot.gate_reason(SENIOR, "Senior Backend Engineer", "",
+                           psp(work_mode="onsite", office_city="berlin"))
+    # гибрид в Порту профилю подходит, в Копенгагене — нет
+    assert not bot.gate_reason(SENIOR, "Senior Backend Engineer", "",
+                               psp(work_mode="hybrid", office_city="porto"))
+    assert bot.gate_reason(SENIOR, "Senior Backend Engineer", "",
+                           psp(work_mode="hybrid", office_city="copenhagen"))
+
+
+def test_passport_levels_only_cut_the_bottom():
+    assert bot.gate_reason(SENIOR, "Software Engineer", "", psp(levels=["junior"]))
+    assert not bot.gate_reason(SENIOR, "Software Engineer", "",
+                               psp(levels=["middle", "senior"]))
+    assert not bot.gate_reason(SENIOR, "Software Engineer", "", psp(levels=[]))
+
+
+def test_passport_off_when_relocation_allowed():
+    movable = dict(SENIOR, relocation="да, готов к переезду")
+    assert not bot.gate_reason(movable, "Senior Backend Engineer", "", psp(hire=["US"]))
+
+
+def test_passport_parse_drops_alien_urls_and_normalises():
+    out = {"items": [{"url": "http://a", "hire": ["pt", " eu"], "work_mode": "Remote",
+                      "levels": ["Senior"], "uncertain": ["hire"],
+                      "role": "Backend", "must": ["Go", "PostgreSQL"],
+                      "domains": ["Fintech"]},
+                     {"url": "http://чужой", "hire": ["US"]}]}
+    rows = bot.parse_passports(out, {"http://a"})
+    assert rows == [("http://a", "PT,EU", "remote", "", "senior", "hire",
+                     "backend", "go,postgresql", "", "fintech")]
+
+
+def test_passport_prompt_keeps_url_and_cuts_text():
+    rows = [("http://a", "Senior Go", "", "x" * 9000)]
+    text = bot.passport_prompt(rows)
+    assert "url=http://a" in text and len(text) < bot.PASSPORT_CHARS + 200
+
+
+def test_gate_rejections_are_not_stored_and_do_not_block_the_slice(monkeypatch):
+    """Отказ ворот строки не оставляет, но и очередь собой не затыкает."""
+    import storage, llm
+    conn = storage.connect()
+    conn.execute("INSERT OR REPLACE INTO profiles(tg_id,data,updated_at) VALUES"
+                 "(77,'{\"level\":\"senior\",\"location\":\"Порту\",\"relocation\":\"нет\"}','2026-10-12')")
+    for url, title, loc, dd in (("https://g/us", "Senior Go Engineer", "Remote US", "g-us"),
+                                ("https://g/pt", "Senior Go Engineer", "Porto", "g-pt")):
+        conn.execute("INSERT OR REPLACE INTO jobs(url,company,title,location,source,"
+                     "first_seen,dedup,description) VALUES(?,'Acme',?,?,'lever',"
+                     "'2026-10-12',?,'текст вакансии')", (url, title, loc, dd))
+    # очередь соседних тестов закрываем, чтобы видеть ровно эти две вакансии
+    conn.execute("INSERT OR REPLACE INTO matches(tg_id,job_url,pct,why,scored_at) "
+                 "SELECT 77, url, 0, 'чужая', '2026-10-12' FROM jobs "
+                 "WHERE url NOT IN ('https://g/us','https://g/pt')")
+    conn.commit()
+
+    def fake_ask(system, user, **kw):
+        return {"items": [{"url": "https://g/pt", "work_mode": "remote"}],
+                "scores": [{"url": "https://g/pt", "pct": 88, "why": "подходит"}]}
+
+    monkeypatch.setattr(llm, "ask_json", fake_ask)
+    bot.score_pending(conn, 77)
+    got = dict(conn.execute("SELECT job_url, pct FROM matches WHERE tg_id=77 "
+                            "AND job_url LIKE 'https://g/%'").fetchall())
+    assert "https://g/us" not in got          # отказ ворот в базу не попал
+    assert got["https://g/pt"] == 88          # а подходящая оценена, срез не забит
+    # паспорт строится только на том, что прошло бесплатные ворота
+    assert conn.execute("SELECT count(*) FROM passports WHERE url='https://g/us'"
+                        ).fetchone()[0] == 0
+
+
+def test_gate_audit_reproduces_rejections_live():
+    """Живой разбор вместо хранимых нулей: причина есть, модель не нужна."""
+    import storage
+    conn = storage.connect()
+    conn.execute("INSERT OR REPLACE INTO profiles(tg_id,data,updated_at) VALUES"
+                 "(78,'{\"level\":\"senior\",\"location\":\"Порту\",\"relocation\":\"нет\"}','2026-10-12')")
+    conn.execute("INSERT OR REPLACE INTO jobs(url,company,title,location,source,"
+                 "first_seen,dedup) VALUES('https://g/us2','Acme','Senior Go',"
+                 "'Remote US','lever','2026-10-12','g-us2')")
+    conn.commit()
+    rejected = {u: why for u, _, _, why in bot.gate_audit(conn, 78)}
+    assert "«US»" in rejected["https://g/us2"]
+
+
+# --- теги вместо триажа ------------------------------------------------------
+
+def test_job_tags_take_role_from_title_and_passport():
+    """Из одного ярлыка модель выбирает привкус, а не основу: «Senior Software
+    Engineer (Backend) — AI/ML» она помечает как ml-engineer. Название спасает."""
+    t = bot.job_tags("Senior Software Engineer (Backend) - AI/ML",
+                     {"role": "ml-engineer", "must": ["Python"], "domains": ["Cloud"]})
+    assert t["role"] == {"backend", "ml-engineer"}
+    assert t["stack"] == {"python"} and t["domain"] == {"cloud"}
+
+
+def test_stack_tags_fold_synonyms_without_false_hits():
+    assert bot.stack_tags(["PostgreSQL", "Postgres", "MySQL"]) == {"sql"}
+    assert bot.stack_tags(["Kubernetes", "Docker", "Helm"]) == {"k8s"}
+    assert bot.stack_tags(["Golang"]) == {"go"}
+    assert bot.stack_tags(["MongoDB"]) == {"nosql"}      # «go» внутри слова не считается
+    assert bot.stack_tags(["Python 3.12"]) == {"python"}
+
+
+def test_profile_tags_and_subscription_round_trip():
+    import storage
+    conn = storage.connect()
+    conn.execute("INSERT OR REPLACE INTO profiles(tg_id,data,updated_at) VALUES"
+                 "(21,'{\"role\":\"Senior Backend\",\"stack\":[\"Go\",\"Kafka\"],"
+                 "\"domains\":[\"fintech\"]}','2026-10-12')")
+    conn.commit()
+    tags = bot.get_tags(conn, 21)
+    # соседние роли в подписке по умолчанию: без них теряется пятая часть
+    assert tags["role"] == {"backend", "platform", "devops-sre"}
+    assert tags["stack"] == {"go", "kafka"}
+    # выведенная подписка сохраняется, чтобы человек мог её поправить
+    assert conn.execute("SELECT count(*) FROM profile_tags WHERE tg_id=21"
+                        ).fetchone()[0] == 6
+    tags["role"].discard("devops-sre")
+    bot.set_tags(conn, 21, tags)
+    assert bot.get_tags(conn, 21)["role"] == {"backend", "platform"}
+
+
+def test_tags_command_edits_roles(monkeypatch):
+    import storage
+    conn = storage.connect()
+    conn.execute("INSERT OR REPLACE INTO profiles(tg_id,data,updated_at) VALUES"
+                 "(22,'{\"role\":\"Senior Backend\",\"stack\":[\"Go\"]}','2026-10-12')")
+    conn.commit()
+    said = []
+    monkeypatch.setattr(bot, "send", lambda chat, text, **kw: said.append(text))
+    bot.cmd_tags(bot.Ctx(conn, 22, 22, "-devops-sre -backend +ерунда", False))
+    assert bot.get_tags(conn, 22)["role"] == {"platform"}
+    assert "Не знаю таких ролей: ерунда" in said[0]
+    assert "platform" in said[-1]
+
+
+def test_score_pending_keeps_untagged_and_drops_foreign_role(monkeypatch):
+    """Чужая роль отсеивается бесплатно, а вакансия без тегов идёт дальше:
+    пустые теги — это «не знаю», а не «не подходит»."""
+    import storage, llm
+    conn = storage.connect()
+    conn.execute("INSERT OR REPLACE INTO profiles(tg_id,data,updated_at) VALUES"
+                 "(23,'{\"level\":\"senior\",\"relocation\":\"да\",\"role\":\"Senior Backend\","
+                 "\"stack\":[\"Go\"]}','2026-10-12')")
+    for url, title in (("https://t/own", "Senior Backend Engineer"),
+                       ("https://t/alien", "Senior Product Manager"),
+                       ("https://t/mute", "Specialist II")):
+        conn.execute("INSERT OR REPLACE INTO jobs(url,company,title,location,source,"
+                     "first_seen,dedup,description) VALUES(?,'Acme',?,'Porto','lever',"
+                     "'2026-10-12',?,'текст')", (url, title, url))
+    conn.execute("INSERT OR REPLACE INTO matches(tg_id,job_url,pct,why,scored_at) "
+                 "SELECT 23, url, 0, 'чужая', '2026-10-12' FROM jobs "
+                 "WHERE url NOT IN ('https://t/own','https://t/alien','https://t/mute')")
+    conn.commit()
+
+    def fake_ask(system, user, **kw):
+        if system is bot.PASSPORT_SYSTEM:
+            return {"items": [{"url": u, "work_mode": "remote"}
+                              for u in ("https://t/own", "https://t/alien", "https://t/mute")]}
+        return {"scores": [{"url": u, "pct": 80, "why": "ок"} for u in
+                           ("https://t/own", "https://t/mute")]}
+
+    monkeypatch.setattr(llm, "ask_json", fake_ask)
+    bot.score_pending(conn, 23)
+    got = dict(conn.execute("SELECT job_url, pct FROM matches WHERE tg_id=23 "
+                            "AND job_url LIKE 'https://t/%'"))
+    assert got == {"https://t/own": 80, "https://t/mute": 80}
+    assert "https://t/alien" not in got         # отсеяна тегами, строки не оставила

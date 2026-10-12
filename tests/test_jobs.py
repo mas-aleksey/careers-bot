@@ -641,14 +641,6 @@ def test_peopleforce_reads_shared_domain_layout(monkeypatch):
     assert seen[0] == "https://www.careers-page.com/hivexteam?page=1"
 
 
-def test_triage_no_longer_judges_geography():
-    """Географию решают ворота: три дешёвые модели путались в строках вида
-    «Remote: Portugal, Poland, Spain» и теряли до половины подходящего."""
-    import bot
-    assert "Географию не оценивай" in bot.TRIAGE_SYSTEM
-    assert "локацию игнорируй" in bot.TRIAGE_SYSTEM
-
-
 def test_wordpress_keeps_description(monkeypatch):
     """Текст вакансии приходит в том же ответе — без него оценка слепа к стеку."""
     page = [{"link": "https://x.test/en/jobs/a/", "lang": "en",

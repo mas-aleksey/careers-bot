@@ -39,6 +39,12 @@ CREATE TABLE IF NOT EXISTS jobs(
   url TEXT PRIMARY KEY, company TEXT, title TEXT, location TEXT,
   source TEXT, first_seen TEXT, posted TEXT, salary TEXT, contact TEXT, closed_at TEXT,
   description TEXT);
+CREATE TABLE IF NOT EXISTS passports(
+  url TEXT PRIMARY KEY, hire TEXT, work_mode TEXT, office_city TEXT,
+  levels TEXT, uncertain TEXT, made_at TEXT,
+  role TEXT, must TEXT, nice TEXT, domains TEXT);
+CREATE TABLE IF NOT EXISTS profile_tags(
+  tg_id INTEGER, tag TEXT, kind TEXT, PRIMARY KEY(tg_id, tag));
 CREATE TABLE IF NOT EXISTS pages(
   url TEXT PRIMARY KEY, hash TEXT, checked_at TEXT);
 """
@@ -65,6 +71,10 @@ LATE_COLUMNS = [
     # суточной сводке — в приход не попадает (first_seen старый), из ухода
     # выбывает (closed_at снят)
     ("jobs", "reopened_at TEXT"),
+    # паспорт дорос до тегов: роль, стек и домен нужны отбору, а не только
+    # блокерам. База у владельца старше этих колонок.
+    ("passports", "role TEXT"), ("passports", "must TEXT"),
+    ("passports", "nice TEXT"), ("passports", "domains TEXT"),
 ]
 INDEXES = [
     "CREATE INDEX IF NOT EXISTS jobs_dedup ON jobs(dedup)",
