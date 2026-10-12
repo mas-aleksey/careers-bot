@@ -332,13 +332,47 @@ def test_successfactors_parses_rows_and_stops_on_total(monkeypatch):
         return SF_PAGE_HTML if len(seen) <= 6 else ""
 
     monkeypatch.setattr(jobs, "get", fake_get)
-    got = jobs.successfactors("careers.vestas.com")
+    # have_text со всеми адресами: здесь проверяем только разбор списка
+    got = jobs.successfactors("careers.vestas.com", have_text=ALL_SF_URLS)
     assert got[0][:4] == ("https://careers.vestas.com/job/Aarhus-Data-Engineer/8200/",
                           "Data Engineer", "Aarhus N, DK, 8200", "2026-09-25")
     assert got[1][3] == "2026-10-08"
     # 12 вакансий по счётчику, по 2 в нашей заглушке — шесть страниц и стоп
     assert len(got) == 12 and len(seen) == 6
     assert "startrow=10" in seen[1] and "locale=en_GB" in seen[0]
+
+
+class ALL_SF_URLS:
+    """Множество, в котором «лежит» любой адрес: имитирует базу, где описание
+    уже есть у всех вакансий."""
+
+    def __contains__(self, item):
+        return True
+
+
+ALL_SF_URLS = ALL_SF_URLS()
+
+
+def test_successfactors_fetches_text_only_for_new(monkeypatch):
+    """Текста в выдаче нет, он на странице вакансии. Дочитываем только то,
+    чего нет в базе, и не больше SF_TEXT_MAX за проход."""
+    import jobs
+    seen = []
+
+    def fake_get(url, want_json=True, **k):
+        seen.append(url)
+        if "/search/" in url:
+            return SF_PAGE_HTML
+        return "<p>" + "Требуется dbt и Airflow. " * 20 + "</p>"
+
+    monkeypatch.setattr(jobs, "get", fake_get)
+    monkeypatch.setattr(jobs, "SF_TEXT_MAX", 1)
+    known = {"https://careers.vestas.com/job/Aarhus-Data-Engineer/8200/"}
+    got = jobs.successfactors("careers.vestas.com", have_text=known)
+    jobs_fetched = [u for u in seen if "/job/" in u]
+    # Известную не трогаем, на вторую тратим единственный лимит
+    assert jobs_fetched == ["https://careers.vestas.com/job/Tokyo-Sales/107/"]
+    assert got[0][6] is None and "dbt" in got[1][6]
 
 
 def test_phenom_posts_widget_and_pages_until_total(monkeypatch):

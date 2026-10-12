@@ -810,7 +810,31 @@ def oracle(s):
     return out or None
 
 
-def successfactors(s):
+SF_TEXT_MAX = 150     # описаний за один обход: у Vestas 631 вакансия, и тянуть
+                      # их все в один проход — полчаса запросов к одному хосту.
+                      # Хвост дочитывается следующими обходами, по 150 за раз
+
+
+def sf_texts(rows, have_text):
+    """Дочитать текст вакансии со страницы: в выдаче списка его нет.
+
+    have_text — адреса, у которых описание уже в базе. Без этого отсечения
+    каждый обход заново качал бы все 631 страницу ради текста, который не
+    меняется. Лимит на проход держит обход в минутах, а не в получасе."""
+    left = SF_TEXT_MAX
+    out = []
+    for r in rows:
+        if left and r[0] not in have_text:
+            page = get(r[0], want_json=False)
+            text = plain_text(page) if isinstance(page, str) else None
+            if text and len(text) >= 300:
+                r = r[:6] + (text,)
+                left -= 1
+        out.append(r)
+    return out
+
+
+def successfactors(s, have_text=()):
     """Карьерный сайт SAP SuccessFactors (RMK): выдача — обычная HTML-таблица
     по десять строк, пагинация через startrow.
 
@@ -843,7 +867,7 @@ def successfactors(s):
                         None, "", None))
         if total and len(out) >= total:
             break
-    return out or None
+    return sf_texts(out, have_text) or None
 
 
 def phenom(s):
@@ -1246,7 +1270,7 @@ def db():
     return storage.connect()
 
 
-def collect(name, url, cache, known=()):
+def collect(name, url, cache, known=(), described=()):
     """Один поток на компанию. Соединение SQLite между потоками не живёт, поэтому
     известные ats/slug и адреса известных вакансий читаются заранее. Discovery
     сюда не входит: Workable режет параллельные запросы, и компания молча
@@ -1256,6 +1280,8 @@ def collect(name, url, cache, known=()):
         return name, ats, slug, embedded(url, with_text=True) or [], None
     if ats == "wordpress":
         return name, ats, slug, wordpress(slug, known), None
+    if ats == "successfactors":
+        return name, ats, slug, successfactors(slug, described), None
     if ats:
         # None (доска не ответила) не схлопывать в []: иначе 429 от Workable
         # попадает в отчёт как «доска вернула пустой список» и diagnose молчит
@@ -1295,6 +1321,8 @@ def run(only=None):
     cache = {n: (a, s) for n, a, s in conn.execute(
         "SELECT name, ats, slug FROM companies WHERE ats IS NOT NULL")}
     known = {u for (u,) in conn.execute("SELECT url FROM jobs")}
+    described = {u for (u,) in conn.execute(
+        "SELECT url FROM jobs WHERE description IS NOT NULL AND description <> ''")}
     # discovery последовательно и один раз на компанию: параллельно ATS отдают 429
     for name, url in companies:
         if name not in cache:
@@ -1303,7 +1331,7 @@ def run(only=None):
                 cache[name] = found
             time.sleep(0.3)
     with ThreadPoolExecutor(max_workers=5) as ex:
-        results = list(ex.map(lambda c: collect(c[0], c[1], cache, known), companies))
+        results = list(ex.map(lambda c: collect(c[0], c[1], cache, known, described), companies))
 
     new, changed, stats, closed, to_diagnose = [], [], [], [], []
     reopened = 0
