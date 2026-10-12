@@ -644,7 +644,10 @@ def ensure_passports(conn, rows):
     score_pending. Паспорт один на вакансию и общий для всех пользователей,
     поэтому второй профиль за него уже не платит."""
     import llm
-    have = {u for (u,) in conn.execute("SELECT url FROM passports")}
+    # role IS NULL — паспорт из прошлой версии схемы, он знает только блокеры.
+    # Такие перестраиваем: без роли и стека вакансия остаётся без тегов.
+    have = {u for (u,) in conn.execute(
+        "SELECT url FROM passports WHERE role IS NOT NULL")}
     todo = [(r[0], r[2], r[3], r[4]) for r in rows if r[0] not in have]
     made = 0
     for i in range(0, len(todo), PASSPORT_BATCH):
@@ -809,6 +812,7 @@ def score_pending(conn, tg_id, limit=SCORE_SLICE, prefer=()):
     profile = get_profile(conn, tg_id)
     if not profile:
         return 0
+    prefer = prefer or ()        # доборки не было — список верхушки пустой, не None
     # Вернувшиеся под новым адресом забирают прежнюю оценку, не доходя до модели.
     inherit_scores(conn, tg_id, profile)
     # По одной вакансии из группы дублей: у Mozilla десять url на одну должность,

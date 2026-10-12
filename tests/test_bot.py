@@ -637,3 +637,43 @@ def test_score_pending_keeps_untagged_and_drops_foreign_role(monkeypatch):
                             "AND job_url LIKE 'https://t/%'"))
     assert got == {"https://t/own": 80, "https://t/mute": 80}
     assert "https://t/alien" not in got         # отсеяна тегами, строки не оставила
+
+
+def test_passport_from_old_schema_is_rebuilt(monkeypatch):
+    """Паспорт без роли — из прошлой версии схемы: без неё вакансия остаётся
+    без тегов, поэтому строим заново."""
+    import storage, llm
+    conn = storage.connect()
+    conn.execute("INSERT OR REPLACE INTO passports(url,hire,work_mode,made_at) "
+                 "VALUES('https://p/old','PT','remote','2026-10-12')")
+    conn.execute("INSERT OR REPLACE INTO passports(url,hire,work_mode,role,made_at) "
+                 "VALUES('https://p/new','PT','remote','backend','2026-10-12')")
+    conn.commit()
+    asked = []
+    monkeypatch.setattr(llm, "ask_json", lambda system, user, **kw: (
+        asked.append(user), {"items": [{"url": "https://p/old", "role": "backend"}]})[1])
+    rows = [("https://p/old", "Acme", "Senior Go", "Porto", "текст"),
+            ("https://p/new", "Acme", "Senior Go", "Porto", "текст")]
+    bot.ensure_passports(conn, rows)
+    assert len(asked) == 1 and "https://p/old" in asked[0] and "https://p/new" not in asked[0]
+    assert conn.execute("SELECT role FROM passports WHERE url='https://p/old'"
+                        ).fetchone()[0] == "backend"
+
+
+def test_score_pending_survives_empty_backlog(monkeypatch):
+    """score_once зовёт score_pending с prefer=None, когда доборки не было."""
+    import storage, llm
+    conn = storage.connect()
+    conn.execute("INSERT OR REPLACE INTO profiles(tg_id,data,updated_at) VALUES"
+                 "(24,'{\"level\":\"senior\",\"relocation\":\"да\",\"role\":\"Senior Backend\"}',"
+                 "'2026-10-12')")
+    conn.execute("INSERT OR REPLACE INTO jobs(url,company,title,location,source,"
+                 "first_seen,dedup,description) VALUES('https://n/1','Acme',"
+                 "'Senior Backend Engineer','Porto','lever','2026-10-12','n1','текст')")
+    conn.execute("INSERT OR REPLACE INTO matches(tg_id,job_url,pct,why,scored_at) "
+                 "SELECT 24, url, 0, 'чужая', '2026-10-12' FROM jobs WHERE url <> 'https://n/1'")
+    conn.commit()
+    monkeypatch.setattr(llm, "ask_json", lambda system, user, **kw: {
+        "items": [{"url": "https://n/1", "role": "backend", "work_mode": "remote"}],
+        "scores": [{"url": "https://n/1", "pct": 77, "why": "ок"}]})
+    assert bot.score_pending(conn, 24, prefer=None) == 1
