@@ -260,6 +260,33 @@ def test_teamtailor_takes_location_from_jobposting():
     assert jobs.tt_place({"_jobposting": "не json"}) == ""
 
 
+def test_manatal_reads_api_with_location_and_text(monkeypatch):
+    """careers-page.com — Manatal: локация и текст приходят API, а не вёрсткой.
+    Пагинация идёт по next, вакансия без hash пропускается."""
+    import jobs
+    pages = {
+        "https://www.careers-page.com/api/v1.0/c/emcd/jobs/": {
+            "results": [
+                {"hash": "AB12", "position_name": "Go Developer",
+                 "location_display": "Limassol, Cyprus",
+                 "description": "<p>" + "Нужен Go и PostgreSQL. " * 20 + "</p>"},
+                {"position_name": "Без hash — пропускаем"}],
+            "next": "https://www.careers-page.com/api/v1.0/c/emcd/jobs/?page=2"},
+        "https://www.careers-page.com/api/v1.0/c/emcd/jobs/?page=2": {
+            "results": [{"hash": "CD34", "position_name": "Analyst",
+                         "location_display": "", "description": None}],
+            "next": None},
+    }
+    monkeypatch.setattr(jobs, "get", lambda u, **k: pages[u])
+    got = jobs.peopleforce("www.careers-page.com/emcd")
+    assert [r[0] for r in got] == ["https://www.careers-page.com/emcd/job/AB12",
+                                   "https://www.careers-page.com/emcd/job/CD34"]
+    assert got[0][1:3] == ("Go Developer", "Limassol, Cyprus")
+    assert "PostgreSQL" in got[0][6]
+    # Пустая локация остаётся пустой строкой, а не None: так её видит гейт
+    assert got[1][2] == "" and got[1][6] is None
+
+
 COMEET_HTML = """
 <ul class="comeet-positions-list">
 <li class="comeet-position"><div class="comeet-position-name"><a href="//medvidi.com/careers/co/remote-eu/48.769/engineering-manager/all">Engineering Manager</a></div><div class="comeet-position-meta">Remote EU  &middot;  Full-time  &middot;  Management</div></li>
@@ -655,24 +682,6 @@ def test_peopleforce_pages_until_nothing_new(monkeypatch):
     assert title == "Senior Devops & Engineer"
 
 
-HIVEX_PAGE = '<a class="d-block" href="/hivexteam/job/L54V9X93">Shopify Developer</a>'
-
-
-def test_peopleforce_reads_shared_domain_layout(monkeypatch):
-    """На careers-page.com вёрстка другая: класс d-block вместо stretched-link."""
-    pages = iter([HIVEX_PAGE, HIVEX_PAGE])
-    seen = []
-
-    def fake_get(url, **kw):
-        seen.append(url)
-        return next(pages, "")
-
-    monkeypatch.setattr(jobs, "get", fake_get)
-    rows = jobs.peopleforce("www.careers-page.com/hivexteam")
-    assert len(rows) == 1                       # вторая страница повторила первую
-    assert rows[0][0] == "https://www.careers-page.com/hivexteam/job/L54V9X93"
-    assert rows[0][1] == "Shopify Developer"
-    assert seen[0] == "https://www.careers-page.com/hivexteam?page=1"
 
 
 def test_wordpress_keeps_description(monkeypatch):

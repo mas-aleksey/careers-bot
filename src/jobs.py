@@ -683,10 +683,39 @@ def aviasales(s):
     return page_text(out, s) if out else None
 
 
+def manatal(slug):
+    """careers-page.com — это Manatal, и у него открытый API со всем сразу:
+    локация в location_display, текст в description, пагинация в next.
+
+    Разбор вёрстки давал ни локации, ни экономии: за текстом адаптер лез на
+    страницу каждой вакансии, то есть шестьдесят лишних запросов у Hivex."""
+    out, url = [], f"https://www.careers-page.com/api/v1.0/c/{slug}/jobs/"
+    for _ in range(20):
+        d = get(url)
+        if not isinstance(d, dict):
+            break
+        for j in d.get("results") or []:
+            h = j.get("hash")
+            if not h:
+                continue
+            out.append((f"https://www.careers-page.com/{slug}/job/{h}",
+                        j.get("position_name", ""), j.get("location_display") or "",
+                        None, None, "", plain_text(j.get("description"))))
+        url = d.get("next")
+        if not url:
+            break
+    return out or None
+
+
 def peopleforce(s):
     """PeopleForce под своим доменом: careers.taxdome.com. Вакансии в вёрстке,
-    по десять на страницу, локации на списке нет — только отдел."""
+    по десять на страницу, локации на списке нет — только отдел.
+
+    Общая витрина careers-page.com — другой движок, Manatal, и читается своим
+    API: слаг там вида www.careers-page.com/<клиент>."""
     host = s.split("/")[0]
+    if host.endswith("careers-page.com") and "/" in s:
+        return manatal(s.split("/", 1)[1])
     out, seen = [], set()
     for page in range(1, 9):                   # у Hivex 60 вакансий по десять
         url = f"https://{s}?page={page}" if "/" in s else f"https://{s}/?page={page}"
