@@ -817,7 +817,22 @@ def comeet(s):
 ORACLE_SIZE = 50      # больше за раз ORC не отдаёт
 
 
-def oracle(s):
+ORACLE_TEXT_MAX = 60  # описаний за обход: у Posten Bring 23 вакансии, запас
+                      # на доски покрупнее. Хвост дочитают следующие проходы
+
+
+def oracle_text(host, site, jid):
+    """Описание лежит в отдельном ресурсе, и finder там с кавычками внутри:
+    ById;Id="2466",siteNumber=CX_1. Без кавычек ответ пустой."""
+    d = get(f"https://{host}/hcmRestApi/resources/latest/recruitingCEJobRequisitionDetails"
+            f"?expand=all&onlyData=true&finder=ById;Id=%22{jid}%22,siteNumber={site}")
+    it = ((d or {}).get("items") or [{}])[0]
+    parts = [it.get(k) for k in ("ExternalDescriptionStr", "ExternalResponsibilitiesStr",
+                                 "ExternalQualificationsStr")]
+    return plain_text(" ".join(x for x in parts if x))
+
+
+def oracle(s, have_text=()):
     """Oracle Recruiting Cloud: слаг — «хост/сайт», например
     fa-evem-saasfaprod1.fa.ocs.oraclecloud.com/CX_1.
 
@@ -827,7 +842,7 @@ def oracle(s):
     host, _, site = s.partition("/")
     if not site:
         return None
-    out, total = [], None
+    out, total, left = [], None, ORACLE_TEXT_MAX
     for page in range(20):
         # Без expand список приходит пустым, а TotalJobsCount — настоящим:
         # молчаливая разница, на которой адаптер сначала вернул ноль вакансий.
@@ -846,10 +861,16 @@ def oracle(s):
             break
         for j in reqs:
             jid = j.get("Id")
-            out.append((f"https://{host}/hcmUI/CandidateExperience/en/sites/{site}/job/{jid}/",
-                        j.get("Title", ""),
+            url = f"https://{host}/hcmUI/CandidateExperience/en/sites/{site}/job/{jid}/"
+            # Текст дочитываем только тем, у кого его ещё нет в базе: он не
+            # меняется, а запрос на вакансию стоит столько же, сколько страница
+            text = None
+            if url not in have_text and left:
+                text = oracle_text(host, site, jid)
+                left -= 1
+            out.append((url, j.get("Title", ""),
                         j.get("PrimaryLocation") or j.get("PrimaryLocationCountry") or "",
-                        posted(j.get("PostedDate")), None, "", None))
+                        posted(j.get("PostedDate")), None, "", text))
         if total and len(out) >= total:
             break
     return out or None
@@ -1327,6 +1348,8 @@ def collect(name, url, cache, known=(), described=()):
         return name, ats, slug, wordpress(slug, known), None
     if ats == "successfactors":
         return name, ats, slug, successfactors(slug, described), None
+    if ats == "oracle":
+        return name, ats, slug, oracle(slug, described), None
     if ats:
         # None (доска не ответила) не схлопывать в []: иначе 429 от Workable
         # попадает в отчёт как «доска вернула пустой список» и diagnose молчит

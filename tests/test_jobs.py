@@ -340,6 +340,32 @@ def test_comeet_reads_positions_from_page(monkeypatch):
     assert jobs.comeet("example.com/careers") is None
 
 
+def test_oracle_fetches_text_only_for_new(monkeypatch):
+    """Описание лежит в отдельном ресурсе. Дочитываем только то, чего нет в
+    базе, и не больше ORACLE_TEXT_MAX за проход."""
+    import jobs
+    seen = []
+
+    def fake_get(url, want_json=True, **k):
+        seen.append(url)
+        if "JobRequisitionDetails" in url:
+            return {"items": [{"ExternalDescriptionStr": "<p>" + "Нужен Go. " * 40 + "</p>",
+                               "ExternalQualificationsStr": "Erfaring med Kubernetes"}]}
+        return {"items": [{"TotalJobsCount": 2, "requisitionList": [
+            {"Id": 1, "Title": "A", "PrimaryLocation": "OSLO", "PostedDate": "2026-10-09"},
+            {"Id": 2, "Title": "B", "PrimaryLocation": "OSLO", "PostedDate": "2026-10-09"}]}]}
+
+    monkeypatch.setattr(jobs, "get", fake_get)
+    monkeypatch.setattr(jobs, "ORACLE_TEXT_MAX", 1)
+    known = {"https://fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/1/"}
+    got = jobs.oracle("fa.oraclecloud.com/CX_1", have_text=known)
+    details = [u for u in seen if "JobRequisitionDetails" in u]
+    # Известную не трогаем, на вторую уходит единственный остаток лимита
+    assert len(details) == 1 and 'Id=%222%22' in details[0]
+    assert got[0][6] is None
+    assert "Kubernetes" in got[1][6]
+
+
 def test_oracle_needs_expand_and_pages_by_total(monkeypatch):
     """Oracle Recruiting Cloud: limit и offset едут внутри finder, а без
     expand список приходит пустым при честном TotalJobsCount."""
@@ -355,7 +381,8 @@ def test_oracle_needs_expand_and_pages_by_total(monkeypatch):
              "PostedDate": "2026-10-09"} for i in range(n)]}]}
 
     monkeypatch.setattr(jobs, "get", fake_get)
-    got = jobs.oracle("fa-evem.oraclecloud.com/CX_1")
+    # have_text со всеми адресами: здесь проверяется только разбор списка
+    got = jobs.oracle("fa-evem.oraclecloud.com/CX_1", have_text=ALL_SF_URLS)
     assert len(got) == 52 and len(seen) == 2
     assert "expand=requisitionList" in seen[0] and "offset=50" in seen[1]
     assert got[0][0].endswith("/sites/CX_1/job/100/")
