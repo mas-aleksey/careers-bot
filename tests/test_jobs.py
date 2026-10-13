@@ -260,6 +260,36 @@ def test_teamtailor_takes_location_from_jobposting():
     assert jobs.tt_place({"_jobposting": "не json"}) == ""
 
 
+AVIASALES_HTML = (
+    '<a href="/about/vacancies/4219517"><div class="title-x">Product Analyst</div></a>'
+    '<a href="/about/vacancies/4330401"><div class="title-x">Editor</div></a>'
+    '<script>{"id":4219517,"position":"Product Analyst","tags":["SQL"],'
+    '"team":{"name":"Product","icon":"https:\\u002F\\u002Fx.ru\\u002Fa.png"},"workPlace":"Удалённо"},'
+    '{"id":4330401,"position":"Editor","tags":[],"team":{"name":"Commerce"},"workPlace":null}</script>')
+
+
+def test_aviasales_takes_place_from_state_json(monkeypatch):
+    """Место работы лежит в JSON состояния страницы, в карточке его нет.
+    Работодатель заполняет поле не всегда — пустое остаётся пустым."""
+    import jobs
+    monkeypatch.setattr(jobs, "get", lambda u, want_json=True, **k: AVIASALES_HTML)
+    monkeypatch.setattr(jobs, "page_text", lambda rows, listing: rows)
+    got = jobs.aviasales("https://www.aviasales.ru/about/vacancies")
+    by_title = {r[1]: r[2] for r in got}
+    assert by_title == {"Product Analyst": "Удалённо", "Editor": ""}
+
+
+def test_bamboohr_reads_remote_from_location_type():
+    """Города у StellarTech пустые во всех полях, но locationType=1 — удалёнка."""
+    import jobs
+    assert jobs.bb_place({"locationType": "1"}) == "Remote"
+    assert jobs.bb_place({"isRemote": True}) == "Remote"
+    assert jobs.bb_place({"locationType": "2"}) == ""
+    # Город важнее типа: он точнее
+    assert jobs.bb_place({"locationType": "1",
+                          "atsLocation": {"city": "Limassol", "country": "Cyprus"}}) == "Limassol, Cyprus"
+
+
 def test_manatal_reads_api_with_location_and_text(monkeypatch):
     """careers-page.com — Manatal: локация и текст приходят API, а не вёрсткой.
     Пагинация идёт по next, вакансия без hash пропускается."""

@@ -283,7 +283,12 @@ def bb_place(j):
         place = ", ".join(x for x in parts if x)
         if place:
             return place
-    return "Remote" if j.get("isRemote") else ""
+    # Города у StellarTech пустые во всех полях, но locationType=1 — это
+    # «удалённо» в терминах BambooHR, и текст вакансии это подтверждает.
+    # ponytail: значение 1 проверено на одной доске, другие типы не трогаем.
+    if j.get("isRemote") or str(j.get("locationType")) == "1":
+        return "Remote"
+    return ""
 
 
 def bamboohr(s):
@@ -666,20 +671,31 @@ AVIASALES_CARD = re.compile(
     r'(?:(?!</a>)[\s\S])*?class="[^"]*\btitle-[^"]*"[^>]*>(?P<title>[^<]{3,80})<')
 
 
+# Рядом с карточками страница несёт свой же JSON состоянием приложения, и там
+# у вакансии есть workPlace. Заполняет его работодатель редко — на 2026-10-13
+# четыре вакансии из 23, — но «Удалённо» в оценке стоит дороже пустой строки.
+AVIASALES_PLACE = re.compile(r'"id":(\d+),"position":.*?"workPlace":(null|"[^"]*")')
+
+
 def aviasales(s):
     """Карточки на своей странице: отдел и должность отдельными блоками.
-    Локации в списке нет вовсе — она в тексте вакансии, его дочитает page_text."""
+    Место работы — в JSON состояния, в вёрстке карточки его нет."""
     html = get(s, want_json=False)
     if not html:
         return None
     root = re.match(r"https?://[^/]+", s)
+    # \u002F в JSON мешает регулярке читать url и слова с «/»
+    places = {m.group(1): m.group(2).strip('"')
+              for m in AVIASALES_PLACE.finditer(html.replace("\\u002F", "/"))
+              if m.group(2) != "null"}
     out, seen = [], set()
     for m in AVIASALES_CARD.finditer(html):
         full = root.group(0) + m.group("href")
         if full in seen:
             continue
         seen.add(full)
-        out.append((full, html_mod.unescape(m.group("title")).strip(), "", None))
+        out.append((full, html_mod.unescape(m.group("title")).strip(),
+                    places.get(full.rsplit("/", 1)[-1], ""), None))
     return page_text(out, s) if out else None
 
 
