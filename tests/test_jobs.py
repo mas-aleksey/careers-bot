@@ -325,6 +325,37 @@ COMEET_HTML = """
 """
 
 
+COMEET_JOB_HTML = (
+    '<nav>Меню сайта: ADHD Adderall Vyvanse Ritalin</nav>'
+    '<div class="comeet-outer-wrapper"><div class="comeet-position-info">'
+    '<div class="comeet-position-description">About The Position Нужен dbt и Airflow.</div>'
+    '<div class="comeet-position-requirements">Требования: SQL, Python.'
+    '</div></div></div>'
+    '<footer>Подвал сайта на тысячу слов</footer>')
+
+
+def test_comeet_takes_only_job_blocks_and_skips_known(monkeypatch):
+    """Страница вакансии — страница всего сайта. Берём только блоки вакансии,
+    иначе в описание уедет меню. Известное не перекачиваем."""
+    import jobs
+    seen = []
+
+    listing = "https://medvidi.com/careers/co/remote-eu/all"
+
+    def fake_get(url, want_json=True, **k):
+        seen.append(url)
+        # Адрес вакансии тоже кончается на /all — различаем по полному совпадению
+        return COMEET_HTML if url == listing else COMEET_JOB_HTML
+
+    monkeypatch.setattr(jobs, "get", fake_get)
+    known = {"https://medvidi.com/careers/co/remote-eu/48.769/engineering-manager/all"}
+    got = jobs.comeet("medvidi.com/careers/co/remote-eu/all", have_text=known)
+    assert got[0][6] is None                       # известную не трогали
+    assert "dbt и Airflow" in got[1][6] and "SQL, Python" in got[1][6]
+    assert "Меню сайта" not in got[1][6] and "Подвал" not in got[1][6]
+    assert len([u for u in seen if u.endswith("senior-frontend/all")]) == 1
+
+
 def test_comeet_reads_positions_from_page(monkeypatch):
     """Comeet-плагин вшивает вакансии прямо в страницу. Ссылки
     протокол-относительные — без urljoin в базу уехал бы битый url."""

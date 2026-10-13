@@ -788,7 +788,23 @@ COMEET_LINK = re.compile(r'comeet-position-name[^>]*>\s*<a href="([^"]+)"[^>]*>(
 COMEET_META = re.compile(r'comeet-position-meta[^>]*>(.*?)</', re.S)
 
 
-def comeet(s):
+# Страница вакансии у Comeet — это страница всего сайта с меню и подвалом.
+# Текст вакансии лежит в своих блоках, и брать надо именно их: иначе в описание
+# уедет каталог лекарств MEDvidi на одиннадцать тысяч символов.
+COMEET_PARTS = re.compile(
+    r'comeet-position-(?:description|responsibilities|requirements)[^>]*>(.*?)'
+    r'(?=<div class="comeet-position-|</div>\s*</div>)', re.S)
+COMEET_TEXT_MAX = 40  # описаний за обход: у Medvidi шесть вакансий, запас на рост
+
+
+def comeet_text(url):
+    page = get(url, want_json=False)
+    if not isinstance(page, str):
+        return None
+    return plain_text(" ".join(COMEET_PARTS.findall(page))) or None
+
+
+def comeet(s, have_text=()):
     """Comeet через WordPress-плагин: вакансии уже вшиты в страницу, API не нужен.
 
     Слаг — адрес страницы без схемы (medvidi.com/careers/co/remote-eu/all).
@@ -798,7 +814,7 @@ def comeet(s):
     page = get(f"https://{s}", want_json=False)
     if not page or "comeet-position" not in page:
         return None
-    out = []
+    out, left = [], COMEET_TEXT_MAX
     for item in COMEET_ITEM.findall(page):
         link = COMEET_LINK.search(item)
         if not link:
@@ -807,10 +823,14 @@ def comeet(s):
         # Мета-строка «Remote EU · Full-time · Senior»: место, занятость, грейд.
         # Грейд из неё в заголовок не тащим — его читает оценка по тексту.
         place = (plain_text(meta.group(1)) if meta else "") or ""
-        out.append((urllib.parse.urljoin(f"https://{s}", link.group(1)),
-                    plain_text(link.group(2)) or "",
+        url = urllib.parse.urljoin(f"https://{s}", link.group(1))
+        text = None
+        if url not in have_text and left:
+            text = comeet_text(url)
+            left -= 1
+        out.append((url, plain_text(link.group(2)) or "",
                     place.split("·")[0].strip(),
-                    None, None, "", None))
+                    None, None, "", text))
     return out or None
 
 
@@ -1350,6 +1370,8 @@ def collect(name, url, cache, known=(), described=()):
         return name, ats, slug, successfactors(slug, described), None
     if ats == "oracle":
         return name, ats, slug, oracle(slug, described), None
+    if ats == "comeet":
+        return name, ats, slug, comeet(slug, described), None
     if ats:
         # None (доска не ответила) не схлопывать в []: иначе 429 от Workable
         # попадает в отчёт как «доска вернула пустой список» и diagnose молчит
