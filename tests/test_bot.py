@@ -677,3 +677,41 @@ def test_score_pending_survives_empty_backlog(monkeypatch):
         "items": [{"url": "https://n/1", "role": "backend", "work_mode": "remote"}],
         "scores": [{"url": "https://n/1", "pct": 77, "why": "ок"}]})
     assert bot.score_pending(conn, 24, prefer=None) == 1
+
+
+def test_stack_tags_new_terms_and_tricky_boundaries():
+    """Словарь пополнен по отчёту о пропущенных терминах 2026-10-13."""
+    assert bot.stack_tags(["React", "Next.js"]) == {"react"}
+    assert bot.stack_tags(["NumPy", "pandas"]) == {"pydata"}
+    assert bot.stack_tags(["PyTorch"]) == {"ml"}
+    assert bot.stack_tags(["Django", "FastAPI"]) == {"python"}
+    assert bot.stack_tags(["Jira", "Confluence"]) == {"tracker"}
+    assert bot.stack_tags(["Salesforce", "HubSpot"]) == {"crm"}
+    assert bot.stack_tags(["SAP", "Workday"]) == {"enterprise"}
+    # три разных языка, которые отличаются одним знаком
+    assert bot.stack_tags(["C++"]) == {"cpp"}
+    assert bot.stack_tags(["C"]) == {"cpp"}
+    assert bot.stack_tags(["C#"]) == {"dotnet"}
+    assert bot.stack_tags([".NET"]) == {"dotnet"}
+    # общие для всех профессий слова тегов не получают: они не различают вакансии
+    for word in ("Excel", "PowerPoint", "MS Office", "Git", "Linux", "Slack", "English"):
+        assert bot.stack_tags([word]) == set(), word
+    # старое поведение не сломано
+    assert bot.stack_tags(["PostgreSQL", "Postgres"]) == {"sql"}
+    assert bot.stack_tags(["MongoDB"]) == {"nosql"}
+
+
+def test_unknown_stack_reports_what_dictionary_misses():
+    """Закрытый словарь протухает молча — отчёт показывает, чего не хватает."""
+    import storage
+    conn = storage.connect()
+    conn.execute("DELETE FROM passports WHERE url LIKE 'https://u/%'")
+    for i in range(4):
+        conn.execute("INSERT OR REPLACE INTO passports(url,must,nice,role,made_at) "
+                     "VALUES(?,'elixir,python',?,'backend',?)",
+                     (f"https://u/{i}", "erlang" if i < 2 else "", storage.now()))
+    conn.commit()
+    missed = dict(bot.unknown_stack(conn))
+    assert missed.get("elixir") == 4        # четыре упоминания — попадает в отчёт
+    assert "erlang" not in missed           # два упоминания — шум, не показываем
+    assert "python" not in missed           # известное слово в отчёт не идёт

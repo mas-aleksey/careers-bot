@@ -5,7 +5,7 @@
 код. Оценку делает Claude отдельно и кладёт результат в .jobs-outbox/<профиль>.md.
 Поэтому один процесс на всех безопасен.
 """
-import json, os, re, sqlite3, secrets, subprocess, sys, threading, time
+import collections, json, os, re, sqlite3, secrets, subprocess, sys, threading, time
 import urllib.error, urllib.parse, urllib.request
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -334,6 +334,26 @@ STACK_SYN = {
     "kafka": "kafka", "rabbitmq": "kafka", "elasticsearch": "search",
     "mongodb": "nosql", "redis": "nosql", "grpc": "grpc", "rest": "rest",
     "graphql": "rest", "uml": "modeling", "bpmn": "modeling",
+    # Пополнение 2026-10-13 по отчёту о пропущенных терминах: 1324 термина из
+    # паспортов не получали ни одного тега. Берём только то, что РАЗЛИЧАЕТ
+    # вакансии. Excel, Office, git, linux, bash, slack и английский сознательно
+    # не берём: они есть и у бухгалтера, и у бэкендера, и общий для всех тег
+    # поднимает в очереди всё разом, то есть просто шумит.
+    "react": "react", "reactjs": "react", "next.js": "react", "nextjs": "react",
+    "vue": "react", "angular": "react",
+    "numpy": "pydata", "pandas": "pydata", "scipy": "pydata", "polars": "pydata",
+    "pytorch": "ml", "tensorflow": "ml", "scikit-learn": "ml", "sklearn": "ml",
+    "django": "python", "fastapi": "python", "flask": "python",
+    "c++": "cpp", "c": "cpp",
+    "tableau": "bi", "power bi": "bi", "powerbi": "bi", "metabase": "bi",
+    "looker": "bi", "superset": "bi",
+    "salesforce": "crm", "hubspot": "crm",
+    "sap": "enterprise", "workday": "enterprise", "erp": "enterprise",
+    "netsuite": "enterprise", "servicenow": "enterprise",
+    "jira": "tracker", "confluence": "tracker",
+    "grafana": "observability", "prometheus": "observability",
+    "datadog": "observability", "opensearch": "search",
+    "html": "web", "css": "web",
 }
 TAG_KINDS = ("role", "stack", "domain")
 
@@ -343,8 +363,10 @@ def stack_tags(words):
     «go» находится внутри «mongodb», а «rest» внутри «forest»."""
     txt = " " + " ".join(re.sub(r"[^a-z0-9+#.]", " ", str(w or "").lower())
                          for w in words) + " "
+    # В класс границы входят + и #: без них тег «c» находится внутри «c++» и
+    # «c#», а это три разные технологии.
     return {tag for word, tag in STACK_SYN.items()
-            if re.search(r"(?<![a-z0-9])" + re.escape(word) + r"(?![a-z0-9])", txt)}
+            if re.search(r"(?<![a-z0-9+#])" + re.escape(word) + r"(?![a-z0-9+#])", txt)}
 
 
 def role_tags(text):
@@ -1498,7 +1520,29 @@ def health_report(conn):
         lines.append("Пусто, но доска отвечает: " + ", ".join(esc(n) for n, in empty[:10]))
     if not silent and not empty:
         lines.append("Все источники отвечают.")
+    missed = unknown_stack(conn)
+    if missed:
+        lines.append("")
+        lines.append("Словарь не знает: "
+                     + ", ".join(f"{esc(t)} ({n})" for t, n in missed))
     return "\n".join(lines)
+
+
+def unknown_stack(conn, days=7, top=10):
+    """Технологии из свежих паспортов, для которых нет тега.
+
+    Словарь закрытый, и это его цена: новая технология молча выпадает из
+    ранжирования. Отчёт показывает, чего не хватает, чтобы пополнять по данным,
+    а не по памяти."""
+    seen = collections.Counter()
+    for must, nice in conn.execute(
+            "SELECT must, nice FROM passports WHERE made_at > ?",
+            ((datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds"),)):
+        for term in (must or "").split(",") + (nice or "").split(","):
+            term = term.strip()
+            if term and not stack_tags([term]):
+                seen[term] += 1
+    return [(t, n) for t, n in seen.most_common(top) if n > 2]
 
 
 def daily_health(conn):
