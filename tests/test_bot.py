@@ -742,3 +742,33 @@ def test_fullstack_with_space_keeps_engineer_from_false_reject():
     assert "fullstack" in tags and "designer" in tags
     mine = bot.profile_tags({"role": "Senior Backend Engineer"})
     assert mine["role"] & tags                 # общий тег есть — не отсекаем
+
+
+def test_says_yes_reads_onboarding_answers():
+    """Согласие в свободной форме: раньше им считались только «да» и «готов»."""
+    assert bot.says_yes("открыта к релокации по всей Европе")
+    assert bot.says_yes("любой формат (офис/гибрид/удалёнка)")
+    assert bot.says_yes("да, 2 дня в офисе")
+    assert not bot.says_yes("нет, Португалию не покидает")
+    assert not bot.says_yes("не рассматриваю")
+    assert not bot.says_yes("")
+
+
+def test_relocating_profile_is_not_blocked_by_office_city():
+    """Готовой к переезду по Европе офис в Париже не блокер, страна найма —
+    по-прежнему да: US-only вакансия отсекается."""
+    valeria = {"level": "middle", "location": "Norway",
+               "relocation": "открыта к релокации по всей Европе",
+               "hybrid": "любой формат (офис/гибрид/удалёнка)"}
+    assert bot.passport_block(valeria, {"work_mode": "hybrid", "office_city": "paris",
+                                        "hire": ["FR"]}) is None
+    assert bot.passport_block(valeria, {"work_mode": "onsite", "office_city": "london",
+                                        "hire": ["GB"]}) is None
+    assert bot.passport_block(valeria, {"work_mode": "remote", "hire": ["US"]})
+    # Неподвижный профиль из Порту — как раньше
+    porto = {"level": "senior", "location": "Porto", "relocation": "нет",
+             "hybrid": "да, 2 дня в офисе"}
+    assert bot.passport_block(porto, {"work_mode": "hybrid", "office_city": "paris",
+                                      "hire": ["FR"]})
+    assert bot.passport_block(porto, {"work_mode": "hybrid", "office_city": "porto",
+                                      "hire": ["PT"]}) is None

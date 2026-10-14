@@ -723,6 +723,19 @@ def get_passports(conn, urls):
     return out
 
 
+# Ответы из онбординга разбираем так же для релокации и гибрида: сначала
+# отрицание, потом согласие. Раньше согласием считались только «да» и «готов»,
+# и «открыта к релокации по всей Европе» с «любой формат (офис/гибрид)»
+# читались как отказ: у Валерии ворота резали гибрид в Париже и офис в Порту.
+SAYS_NO = r"\b(нет|no|not)\b|\bне\s"
+SAYS_YES = r"\b(да|yes|any)\b|готов|открыт|рассматрива|любой|open to|willing"
+
+
+def says_yes(text):
+    t = str(text or "").lower()
+    return bool(re.search(SAYS_YES, t)) and not re.search(SAYS_NO, t)
+
+
 def passport_block(profile, psp):
     """Блокер по паспорту или None. «Не знаю» — не блокер, это осознанно:
     ложный отказ стоит дороже лишней оценки (замер в docs/scaling.md)."""
@@ -736,7 +749,12 @@ def passport_block(profile, psp):
     mode = psp.get("work_mode") or "not-stated"
     city = psp.get("office_city") or ""
     home = any(h in city for h in HOME_CITIES)
-    if "work_mode" not in unc:
+    # Готов переехать в пределах региона — офис в чужом городе не блокер:
+    # страну найма уже проверили выше, а город он выберет сам.
+    if "work_mode" not in unc and says_yes(profile.get("relocation")):
+        if mode == "hybrid" and city and not says_yes(profile.get("hybrid")):
+            return "гибрид, профиль его не рассматривает"
+    elif "work_mode" not in unc:
         # Без названного города «onsite» — это догадка извлекателя, а не факт:
         # замер 2026-10-12 показал, что дешёвая модель так помечает вакансии,
         # где просто не сказано про формат.
@@ -747,7 +765,7 @@ def passport_block(profile, psp):
         if mode == "hybrid" and city:
             if not home:
                 return f"гибрид в «{city[:30]}», по тексту вакансии"
-            if not re.search(r"\b(да|yes)\b|готов", str(profile.get("hybrid", "")).lower()):
+            if not says_yes(profile.get("hybrid")):
                 return "гибрид, профиль его не рассматривает"
     lv = {l for l in (psp.get("levels") or []) if l}
     if (lv and "levels" not in unc and lv <= {"intern", "junior"}
