@@ -606,36 +606,40 @@ def test_tags_command_edits_roles(monkeypatch):
 
 
 def test_score_pending_keeps_untagged_and_drops_foreign_role(monkeypatch):
-    """Чужая роль отсеивается бесплатно, а вакансия без тегов идёт дальше:
-    пустые теги — это «не знаю», а не «не подходит»."""
+    """Чужая профессия отсеивается бесплатно, а вакансия без тегов идёт дальше:
+    пустые теги — это «не знаю», а не «не подходит». Соседняя техническая роль
+    тоже идёт к модели: product manager у бэкендера не повод для отказа."""
     import storage, llm
     conn = storage.connect()
     conn.execute("INSERT OR REPLACE INTO profiles(tg_id,data,updated_at) VALUES"
                  "(23,'{\"level\":\"senior\",\"relocation\":\"да\",\"role\":\"Senior Backend\","
                  "\"stack\":[\"Go\"]}','2026-10-12')")
     for url, title in (("https://t/own", "Senior Backend Engineer"),
-                       ("https://t/alien", "Senior Product Manager"),
+                       ("https://t/alien", "Senior Account Executive"),
+                       ("https://t/near", "Senior Product Manager"),
                        ("https://t/mute", "Specialist II")):
         conn.execute("INSERT OR REPLACE INTO jobs(url,company,title,location,source,"
                      "first_seen,dedup,description) VALUES(?,'Acme',?,'Porto','lever',"
                      "'2026-10-12',?,'текст')", (url, title, url))
     conn.execute("INSERT OR REPLACE INTO matches(tg_id,job_url,pct,why,scored_at) "
                  "SELECT 23, url, 0, 'чужая', '2026-10-12' FROM jobs "
-                 "WHERE url NOT IN ('https://t/own','https://t/alien','https://t/mute')")
+                 "WHERE url NOT IN ('https://t/own','https://t/alien','https://t/mute',"
+                 "'https://t/near')")
     conn.commit()
 
     def fake_ask(system, user, **kw):
         if system is bot.PASSPORT_SYSTEM:
             return {"items": [{"url": u, "work_mode": "remote"}
-                              for u in ("https://t/own", "https://t/alien", "https://t/mute")]}
+                              for u in ("https://t/own", "https://t/alien", "https://t/mute",
+                                        "https://t/near")]}
         return {"scores": [{"url": u, "pct": 80, "why": "ок"} for u in
-                           ("https://t/own", "https://t/mute")]}
+                           ("https://t/own", "https://t/mute", "https://t/near")]}
 
     monkeypatch.setattr(llm, "ask_json", fake_ask)
     bot.score_pending(conn, 23)
     got = dict(conn.execute("SELECT job_url, pct FROM matches WHERE tg_id=23 "
                             "AND job_url LIKE 'https://t/%'"))
-    assert got == {"https://t/own": 80, "https://t/mute": 80}
+    assert got == {"https://t/own": 80, "https://t/mute": 80, "https://t/near": 80}
     assert "https://t/alien" not in got         # отсеяна тегами, строки не оставила
 
 

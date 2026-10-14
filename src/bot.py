@@ -356,6 +356,13 @@ STACK_SYN = {
     "html": "web", "css": "web",
 }
 TAG_KINDS = ("role", "stack", "domain")
+# Профессии, которые отсекаем по тегу без модели. Только нетехнические: между
+# соседними инженерными ролями граница размыта, и отказ по ней дал ложные
+# отказы у всех троих. Замер 2026-10-14 по оценкам, сделанным до тегов:
+# product manager у бизнес-аналитика — 70 и 68, backend у дата-инженера — 72,
+# ml-engineer у бэкендера — 88. Цена — около сотни вызовов модели в день
+# сверху: ложный отказ дороже.
+FOREIGN_ROLES = {"sales", "support", "marketing", "hr", "finance", "designer", "legal"}
 
 
 def stack_tags(words):
@@ -866,16 +873,17 @@ def score_pending(conn, tg_id, limit=SCORE_SLICE, prefer=()):
     rows = passed
 
     # Отбор по тегам вместо дешёвой модели: бесплатно, детерминированно и
-    # объяснимо словами. Условие — общий ролевой тег; стек и домен только
-    # двигают вакансию в очереди. Строк в matches отказ не оставляет: решение
-    # воспроизводится на следующем проходе за микросекунды.
+    # объяснимо словами. Отказываем только заведомо чужой профессии; стек и
+    # домен двигают вакансию в очереди. Строк в matches отказ не оставляет:
+    # решение воспроизводится на следующем проходе за микросекунды.
     mine = get_tags(conn, tg_id, profile)
     survivors = []
     for r in rows:
         theirs = job_tags(r[2], psps.get(r[0]))
         # Тегов у вакансии нет вовсе — это «не знаю», а не «чужая»: паспорт мог
         # не построиться, а название оказаться без узнаваемых слов.
-        if mine["role"] and theirs["role"] and not (mine["role"] & theirs["role"]):
+        if (mine["role"] and theirs["role"] and theirs["role"] <= FOREIGN_ROLES
+                and not (mine["role"] & theirs["role"])):
             continue
         survivors.append((tag_weight(mine, theirs), r[0] in prefer, r))
     if len(rows) != len(survivors):
