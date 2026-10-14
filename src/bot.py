@@ -293,7 +293,7 @@ RESCORE_TOP = 20       # сколько вакансий истории дооц
 ROLE_RX = {
     "backend": r"backend|back-end|software engineer|server-side|\bapi\b|micro-?service",
     "frontend": r"frontend|front-end|\breact\b|\bangular\b",
-    "fullstack": r"full-?stack",
+    "fullstack": r"full[- ]?stack",
     "mobile": r"\bios\b|android|mobile engineer|flutter",
     "platform": r"platform|infrastructure|cloud engineer",
     "devops-sre": r"\bsre\b|site reliability|devops|reliability engineer",
@@ -310,12 +310,12 @@ ROLE_RX = {
     # Заведомо чужие профессии тоже получают тег: иначе вакансия остаётся без
     # тегов, читается как «не знаю» и доходит до платного паспорта. Замер
     # 2026-10-12: без этих строк 72% открытых вакансий шли дальше без решения.
-    "sales": r"account executive|account manager|sales|business development|bdr|sdr",
+    "sales": r"account executive|account manager|sales|business development|\bbdr\b|\bsdr\b",
     "support": r"customer success|support engineer|technician|helpdesk|service desk",
-    "marketing": r"marketing|content writer|copywriter|seo|brand ",
-    "hr": r"recruiter|talent acquisition|people partner|hr",
+    "marketing": r"marketing|content writer|copywriter|\bseo\b|brand ",
+    "hr": r"recruiter|talent acquisition|people partner|\bhr\b",
     "finance": r"accountant|controller|financial analyst|payroll|treasury",
-    "designer": r"designer|ux|ui designer|motion",
+    "designer": r"designer|\bux\b|\bui\b designer|motion",
     "legal": r"legal counsel|lawyer|compliance officer|paralegal",
 }
 # Синоним технологии -> тег. Словарь закрытый намеренно: свободные теги
@@ -392,7 +392,10 @@ def job_tags(title, psp=None):
 # devops-sre — все 19. Доски называют одно и то же разными словами, и человек
 # не обязан об этом знать.
 ROLE_NEIGHBOURS = {
-    "backend": {"platform", "devops-sre"},
+    # fullstack у бэкендера — замер 2026-10-14: из 60 таких вакансий, которые
+    # фильтр отсекал у Алексея, по тексту набрали 82, 80, 78 и 72 балла.
+    # Обратное соседство fullstack -> backend было, прямого не было.
+    "backend": {"platform", "devops-sre", "fullstack"},
     "platform": {"backend", "devops-sre"},
     "devops-sre": {"platform", "backend"},
     "data-engineer": {"analyst-data", "ml-engineer", "platform"},

@@ -581,14 +581,14 @@ def test_profile_tags_and_subscription_round_trip():
     conn.commit()
     tags = bot.get_tags(conn, 21)
     # соседние роли в подписке по умолчанию: без них теряется пятая часть
-    assert tags["role"] == {"backend", "platform", "devops-sre"}
+    assert tags["role"] == {"backend", "platform", "devops-sre", "fullstack"}
     assert tags["stack"] == {"go", "kafka"}
     # выведенная подписка сохраняется, чтобы человек мог её поправить
     assert conn.execute("SELECT count(*) FROM profile_tags WHERE tg_id=21"
-                        ).fetchone()[0] == 6
+                        ).fetchone()[0] == 7
     tags["role"].discard("devops-sre")
     bot.set_tags(conn, 21, tags)
-    assert bot.get_tags(conn, 21)["role"] == {"backend", "platform"}
+    assert bot.get_tags(conn, 21)["role"] == {"backend", "platform", "fullstack"}
 
 
 def test_tags_command_edits_roles(monkeypatch):
@@ -600,7 +600,7 @@ def test_tags_command_edits_roles(monkeypatch):
     said = []
     monkeypatch.setattr(bot, "send", lambda chat, text, **kw: said.append(text))
     bot.cmd_tags(bot.Ctx(conn, 22, 22, "-devops-sre -backend +ерунда", False))
-    assert bot.get_tags(conn, 22)["role"] == {"platform"}
+    assert bot.get_tags(conn, 22)["role"] == {"platform", "fullstack"}
     assert "Не знаю таких ролей: ерунда" in said[0]
     assert "platform" in said[-1]
 
@@ -715,3 +715,26 @@ def test_unknown_stack_reports_what_dictionary_misses():
     assert missed.get("elixir") == 4        # четыре упоминания — попадает в отчёт
     assert "erlang" not in missed           # два упоминания — шум, не показываем
     assert "python" not in missed           # известное слово в отчёт не идёт
+
+
+def test_role_rx_has_no_control_chars_and_short_words_match():
+    """В bbf2320 вместо \\b в файл записались символы backspace: правила hr, ux,
+    seo, bdr и sdr не совпадали ни с чем, и такие вакансии уходили к дорогой
+    модели как «роль неизвестна». Порча невидима глазом — ловим её тестом."""
+    assert not any(ch < " " for rx in bot.ROLE_RX.values() for ch in rx)
+    assert bot.role_tags("Senior HR Business Partner") == {"hr"}
+    assert bot.role_tags("Senior UX Researcher") == {"designer"}
+    assert bot.role_tags("Senior Manager, SEO & GEO") == {"marketing"}
+    # Граница слова: внутри других слов эти буквы тег не дают
+    assert bot.role_tags("Linux Kernel Engineer") == set() or "designer" not in bot.role_tags("Linux Kernel Engineer")
+    assert "hr" not in bot.role_tags("Throughput Engineer")
+
+
+def test_fullstack_with_space_keeps_engineer_from_false_reject():
+    """«Full Stack» через пробел не распознавался. Вместе с вернувшимся \\bux\\b
+    вакансия «Full Stack Engineer — Core UX» получила бы только designer и была
+    бы отсечена у бэкендера до модели."""
+    tags = bot.role_tags("Senior Full Stack Engineer - Core UX")
+    assert "fullstack" in tags and "designer" in tags
+    mine = bot.profile_tags({"role": "Senior Backend Engineer"})
+    assert mine["role"] & tags                 # общий тег есть — не отсекаем
