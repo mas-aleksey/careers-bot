@@ -772,3 +772,20 @@ def test_relocating_profile_is_not_blocked_by_office_city():
                                       "hire": ["FR"]})
     assert bot.passport_block(porto, {"work_mode": "hybrid", "office_city": "porto",
                                       "hire": ["PT"]}) is None
+
+
+def test_lisbon_hybrid_blocks_porto_profile():
+    """Порту и Лиссабон — разные города: гибрид в Лиссабоне для того, кто ходит в
+    офис только в Порту, блокер. «Porto or Lisbon» по-прежнему проходит."""
+    porto = {"level": "senior", "location": "Porto", "relocation": "нет",
+             "hybrid": "да, 2 дня в неделю в Порту"}
+    assert bot.passport_block(porto, {"work_mode": "hybrid", "office_city": "lisbon",
+                                      "hire": ["PT"]})
+    assert bot.passport_block(porto, {"work_mode": "hybrid", "office_city": "porto or lisbon",
+                                      "hire": ["PT"]}) is None
+
+
+def test_score_prompt_treats_avoid_as_blocker():
+    """Профиль хранит, чего человек не хочет, а промпт оценки поле avoid не
+    упоминал: бизнес-аналитику приходил Senior Data Scientist на 62 балла."""
+    assert "avoid" in bot.SCORE_SYSTEM
