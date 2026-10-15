@@ -5,7 +5,7 @@
 код. Оценку делает Claude отдельно и кладёт результат в .jobs-outbox/<профиль>.md.
 Поэтому один процесс на всех безопасен.
 """
-import collections, json, os, re, sqlite3, secrets, subprocess, sys, threading, time
+import json, os, re, sqlite3, secrets, subprocess, sys, threading, time
 import urllib.error, urllib.parse, urllib.request
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -1556,11 +1556,6 @@ def health_report(conn):
         lines.append("Пусто, но доска отвечает: " + ", ".join(esc(n) for n, in empty[:10]))
     if not silent and not empty:
         lines.append("Все источники отвечают.")
-    missed = unknown_stack(conn)
-    if missed:
-        lines.append("")
-        lines.append("Словарь не знает: "
-                     + ", ".join(f"{esc(t)} ({n})" for t, n in missed))
     lines.append("")
     lines.append(money_line())
     return "\n".join(lines)
@@ -1579,23 +1574,6 @@ def money_line():
     if left < LOW_BALANCE:
         return f"⚠️ <b>OpenRouter: остаток ${left:.2f}</b> — пополните, иначе оценка встанет"
     return f"OpenRouter: остаток ${left:.2f}"
-
-
-def unknown_stack(conn, days=7, top=10):
-    """Технологии из свежих паспортов, для которых нет тега.
-
-    Словарь закрытый, и это его цена: новая технология молча выпадает из
-    ранжирования. Отчёт показывает, чего не хватает, чтобы пополнять по данным,
-    а не по памяти."""
-    seen = collections.Counter()
-    for must, nice in conn.execute(
-            "SELECT must, nice FROM passports WHERE made_at > ?",
-            ((datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds"),)):
-        for term in (must or "").split(",") + (nice or "").split(","):
-            term = term.strip()
-            if term and not stack_tags([term]):
-                seen[term] += 1
-    return [(t, n) for t, n in seen.most_common(top) if n > 2]
 
 
 def daily_health(conn):

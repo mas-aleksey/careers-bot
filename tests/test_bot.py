@@ -705,22 +705,6 @@ def test_stack_tags_new_terms_and_tricky_boundaries():
     assert bot.stack_tags(["MongoDB"]) == {"nosql"}
 
 
-def test_unknown_stack_reports_what_dictionary_misses():
-    """Закрытый словарь протухает молча — отчёт показывает, чего не хватает."""
-    import storage
-    conn = storage.connect()
-    conn.execute("DELETE FROM passports WHERE url LIKE 'https://u/%'")
-    for i in range(4):
-        conn.execute("INSERT OR REPLACE INTO passports(url,must,nice,role,made_at) "
-                     "VALUES(?,'elixir,python',?,'backend',?)",
-                     (f"https://u/{i}", "erlang" if i < 2 else "", storage.now()))
-    conn.commit()
-    missed = dict(bot.unknown_stack(conn))
-    assert missed.get("elixir") == 4        # четыре упоминания — попадает в отчёт
-    assert "erlang" not in missed           # два упоминания — шум, не показываем
-    assert "python" not in missed           # известное слово в отчёт не идёт
-
-
 def test_role_rx_has_no_control_chars_and_short_words_match():
     """В bbf2320 вместо \\b в файл записались символы backspace: правила hr, ux,
     seo, bdr и sdr не совпадали ни с чем, и такие вакансии уходили к дорогой
