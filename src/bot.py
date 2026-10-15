@@ -1561,7 +1561,24 @@ def health_report(conn):
         lines.append("")
         lines.append("Словарь не знает: "
                      + ", ".join(f"{esc(t)} ({n})" for t, n in missed))
+    lines.append("")
+    lines.append(money_line())
     return "\n".join(lines)
+
+
+LOW_BALANCE = 3.0   # долларов: при нынешних ~$0.5 в день это неделя запаса
+
+
+def money_line():
+    """Строка про остаток на OpenRouter. Не узнали — так и пишем: молчание
+    здесь опаснее, чем лишняя строка."""
+    import llm
+    left = llm.balance()
+    if left is None:
+        return "OpenRouter: остаток узнать не удалось"
+    if left < LOW_BALANCE:
+        return f"⚠️ <b>OpenRouter: остаток ${left:.2f}</b> — пополните, иначе оценка встанет"
+    return f"OpenRouter: остаток ${left:.2f}"
 
 
 def unknown_stack(conn, days=7, top=10):

@@ -12,3 +12,14 @@ os.environ["BOT_DATA"] = tempfile.mkdtemp()
 os.environ["TG_BOT_TOKEN"] = "test"
 os.environ["OPENROUTER_API_KEY"] = "test"
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def no_balance_request(monkeypatch):
+    """Ежедневный отчёт спрашивает остаток у OpenRouter. В тестах сети нет:
+    остаток подставляем, а тест про сам остаток заменяет его своим."""
+    import llm
+    monkeypatch.setattr(llm, "balance", lambda: None)

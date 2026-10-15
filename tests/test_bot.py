@@ -789,3 +789,14 @@ def test_score_prompt_treats_avoid_as_blocker():
     """Профиль хранит, чего человек не хочет, а промпт оценки поле avoid не
     упоминал: бизнес-аналитику приходил Senior Data Scientist на 62 балла."""
     assert "avoid" in bot.SCORE_SYSTEM
+
+
+def test_money_line_warns_on_low_balance(monkeypatch):
+    """Кончившиеся деньги выглядят как тишина — отчёт должен сказать прямо."""
+    import llm
+    monkeypatch.setattr(llm, "balance", lambda: 9.731)
+    assert bot.money_line() == "OpenRouter: остаток $9.73"
+    monkeypatch.setattr(llm, "balance", lambda: 1.2)
+    assert "⚠️" in bot.money_line() and "$1.20" in bot.money_line()
+    monkeypatch.setattr(llm, "balance", lambda: None)
+    assert "не удалось" in bot.money_line()
