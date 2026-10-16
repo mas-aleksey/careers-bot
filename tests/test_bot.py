@@ -784,3 +784,14 @@ def test_money_line_warns_on_low_balance(monkeypatch):
     assert "⚠️" in bot.money_line() and "$1.20" in bot.money_line()
     monkeypatch.setattr(llm, "balance", lambda: None)
     assert "не удалось" in bot.money_line()
+
+
+def test_north_america_in_location_blocks_but_not_with_europe():
+    """«Remote, North America» в поле локации ворота не узнавали: в справочнике
+    мест было americas, а это другое слово. Вместе с EU — проходит."""
+    porto = {"level": "senior", "location": "Porto", "relocation": "нет",
+             "hybrid": "да, 2 дня в офисе"}
+    assert bot.gate_reason(porto, "Senior Product Manager", "Remote, North America")
+    assert bot.gate_reason(porto, "Senior Product Manager",
+                           "Remote - North America - EU - UK") is None
+    assert "North America" in bot.PASSPORT_SYSTEM

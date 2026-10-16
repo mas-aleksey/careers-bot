@@ -525,7 +525,7 @@ def spread(conn, tg_id, url, pct, why, profile=None, triage_pct=None):
 # промолчали», а не «вакансию выбросили».
 PLACES = re.compile(
     r"united states|\busa\b|u\.s\.|canada|mexico|brazil|argentina|chile|colombia|peru"
-    r"|latam|americas|india|bengaluru|bangalore|hyderabad|pune|gurgaon|japan|tokyo"
+    r"|latam|americas|north america|india|bengaluru|bangalore|hyderabad|pune|gurgaon|japan|tokyo"
     r"|singapore|china|hong kong|korea|apac|australia|sydney|melbourne|brisbane"
     r"|auckland|new zealand|philippines|vietnam|indonesia|malaysia|thailand|nigeria"
     r"|lagos|kenya|egypt|south africa|dubai|\buae\b|united arab|saudi|\bksa\b|qatar|kuwait"
@@ -624,7 +624,10 @@ PASSPORT_SYSTEM = """Ты извлекаешь из текста ваканси�
 
 hire — откуда компания может нанять человека, а не где стоит офис. ISO-коды
 стран (PT, ES, DE, US, IN), либо EU, EUROPE, EMEA, WORLDWIDE, AMERICAS, APAC,
-LATAM. «Remote (US only)» → ["US"]. «Remote, Europe» → ["EUROPE"]. Просто
+LATAM. «Remote (US only)» → ["US"]. «Remote, Europe» → ["EUROPE"].
+«Remote, North America», «open to candidates across North America» → ["US", "CA"].
+Если North America упомянута только в рассказе о компании («offices in North
+America and Europe»), это не про найм — не ставь. Просто
 «Remote» без уточнения → [].
 work_mode — remote, hybrid, onsite или not-stated. onsite и hybrid ставь
 ТОЛЬКО если в тексте есть прямые слова: on-site, in office, X days a week,
