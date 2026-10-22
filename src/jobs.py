@@ -4,7 +4,7 @@
 Компании добавляются через бота и живут в таблице companies. У кого нет
 читаемой доски — следим за изменением карьерной страницы по хешу.
 """
-import ast, hashlib, json, os, re, sys, threading, time, urllib.error, urllib.parse, urllib.request
+import ast, hashlib, json, os, re, ssl, sys, threading, time, urllib.error, urllib.parse, urllib.request
 import html as html_mod
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
@@ -13,6 +13,14 @@ from pathlib import Path
 
 import storage
 
+
+# Корни, которых нет в бандле образа. GoDaddy TLS Root CA - R1 (2025): Akvelon
+# с 2026-10-10 шлёт его самоподписанную копию раньше кросс-подписи от G2, и
+# OpenSSL обрывает цепочку на ней — CERTIFICATE_VERIFY_FAILED, «self-signed
+# certificate in certificate chain». Ключ тот же, что у кросс-сертификата под G2.
+_ctx = ssl.create_default_context()
+_ctx.load_verify_locations(Path(__file__).with_name("extra-roots.pem"))
+urllib.request.install_opener(urllib.request.build_opener(urllib.request.HTTPSHandler(context=_ctx)))
 
 UA = {"User-Agent": "Mozilla/5.0 (careers-bot; +local)"}
 # Отдельные бекенды рвут соединение на честном имени бота.
