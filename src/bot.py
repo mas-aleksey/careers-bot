@@ -24,7 +24,7 @@ HELP = """Что я умею:
 /edit <текст> — поправить профиль словами
 /add <ссылка или название> — добавить компанию в отслеживание
 /settings — частота уведомлений и порог совпадения
-/pause, /resume — приостановить и вернуть уведомления
+/pause, /resume — остановить и вернуть подбор вместе с уведомлениями
 /cancel — отменить начатое действие"""
 
 ADMIN_HELP = "\n\nАдминское: /invite, /users, /revoke <id>"
@@ -68,6 +68,7 @@ PROFILE_MENU = [[("⚙️ Настройки", "set:menu")],
                 [("➕ Добавить компанию", "go:add")],
                 [("📄 Обновить резюме", "go:cv")]]
 SETTINGS_MENU = [[("Порог совпадения", "set:th"), ("Уведомления", "set:nf")],
+                 [("⏸ Пауза / ▶️ включить", "pz:toggle")],
                  [("← к профилю", "go:profile")]]
 TH_MENU = [[("50%", "th:50"), ("65%", "th:65"), ("80%", "th:80"), ("90%", "th:90")],
            [("← настройки", "set:menu")]]
@@ -1115,8 +1116,10 @@ def deliver(conn):
 def settings_text(conn, tg_id):
     row = conn.execute("SELECT min_match, notify FROM profiles WHERE tg_id=?", (tg_id,)).fetchone()
     floor, mode = (row or (70, "daily"))
+    paused = conn.execute("SELECT paused FROM users WHERE tg_id=?", (tg_id,)).fetchone()
     return (f"Порог совпадения: {floor}%\n"
-            f"Уведомления: {NOTIFY_RU.get(mode, mode)}\n\n"
+            f"Уведомления: {NOTIFY_RU.get(mode, mode)}\n"
+            f"Подбор: {'на паузе' if paused and paused[0] else 'идёт'}\n\n"
             "Что поменять?")
 
 
@@ -1141,6 +1144,9 @@ def on_callback(conn, cq):
             conn.execute("UPDATE profiles SET notify=? WHERE tg_id=?", (data[3:], tg_id))
             conn.commit()
             note = f"Уведомления: {NOTIFY_RU.get(data[3:], data[3:])}"
+        elif data == "pz:toggle":
+            row = conn.execute("SELECT paused FROM users WHERE tg_id=?", (tg_id,)).fetchone()
+            note = set_paused(conn, tg_id, not row[0])
     call("answerCallbackQuery", callback_query_id=cq["id"], text=note)
     if data == "go:cancel":
         conn.execute("UPDATE users SET awaiting=NULL WHERE tg_id=?", (tg_id,))
@@ -1293,14 +1299,30 @@ def cmd_edit(c):
     c.say(apply_edit(c.conn, c.tg_id, c.arg), html=True, markup=keyboard(PROFILE_MENU))
 
 
+def set_paused(conn, tg_id, on):
+    """Пауза останавливает не только рассылку, но и оценку: на человека на паузе
+    модель не зовём. «Уведомления: выключены» — другое, там оценка копится.
+
+    Снятие паузы назначает доборку: иначе всё накопленное за паузу ушло бы в
+    дорогую модель по одной вакансии, а доборка отдаёт ей только верхушку."""
+    was = conn.execute("SELECT paused FROM users WHERE tg_id=?", (tg_id,)).fetchone()
+    conn.execute("UPDATE users SET paused=? WHERE tg_id=?", (int(on), tg_id))
+    if was and was[0] and not on:
+        conn.execute("INSERT INTO meta(key,value) VALUES(?,'1') "
+                     "ON CONFLICT(key) DO UPDATE SET value='1'", (backlog_key(tg_id),))
+    conn.commit()
+    if not on:
+        SCORE_WAKE.set()
+    return ("Подбор и уведомления остановлены, на вас ничего не тратится. /resume вернёт."
+            if on else "Подбор снова идёт: вакансии за паузу разберу, лучшие пришлю.")
+
+
 def cmd_pause(c):
-    c.conn.execute("UPDATE users SET paused=1 WHERE tg_id=?", (c.tg_id,)); c.conn.commit()
-    c.say("Уведомления остановлены. /resume вернёт.")
+    c.say(set_paused(c.conn, c.tg_id, True))
 
 
 def cmd_resume(c):
-    c.conn.execute("UPDATE users SET paused=0 WHERE tg_id=?", (c.tg_id,)); c.conn.commit()
-    c.say("Уведомления снова идут.")
+    c.say(set_paused(c.conn, c.tg_id, False))
 
 
 def cmd_invite(c):
@@ -1476,7 +1498,9 @@ def score_once():
     её не повторил."""
     conn = db()
     try:
-        for (tg_id,) in conn.execute("SELECT tg_id FROM profiles").fetchall():
+        for (tg_id,) in conn.execute(
+                "SELECT p.tg_id FROM profiles p LEFT JOIN users u USING(tg_id) "
+                "WHERE COALESCE(u.paused, 0) = 0").fetchall():
             known = None
             if conn.execute("SELECT 1 FROM meta WHERE key=?",
                             (backlog_key(tg_id),)).fetchone():

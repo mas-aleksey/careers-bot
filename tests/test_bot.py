@@ -795,3 +795,28 @@ def test_north_america_in_location_blocks_but_not_with_europe():
     assert bot.gate_reason(porto, "Senior Product Manager",
                            "Remote - North America - EU - UK") is None
     assert "North America" in bot.PASSPORT_SYSTEM
+
+
+def test_pause_stops_scoring_and_resume_schedules_backlog(monkeypatch):
+    """На паузе модель не зовём; снятие паузы назначает доборку, а не поштучную оценку."""
+    import storage
+    conn = storage.connect()
+    for t in (31, 32):
+        conn.execute("INSERT OR REPLACE INTO users(tg_id,paused) VALUES(?,0)", (t,))
+        conn.execute("INSERT OR REPLACE INTO profiles(tg_id,data) VALUES(?,'{}')", (t,))
+    conn.execute("DELETE FROM meta WHERE key LIKE 'backlog:3%'")
+    conn.commit()
+    bot.set_paused(conn, 31, True)
+    scored = []
+    monkeypatch.setattr(bot, "db", lambda: storage.connect())
+    monkeypatch.setattr(bot, "score_pending", lambda c, t, **kw: scored.append(t))
+    monkeypatch.setattr(bot, "backlog_pass", lambda c, t: scored.append(("bl", t)))
+    bot.score_once()
+    assert 31 not in scored and 32 in scored
+    bot.set_paused(conn, 32, False)                      # не был на паузе — доборки нет
+    assert not conn.execute("SELECT 1 FROM meta WHERE key=?", (bot.backlog_key(32),)).fetchone()
+    bot.set_paused(conn, 31, False)
+    assert conn.execute("SELECT 1 FROM meta WHERE key=?", (bot.backlog_key(31),)).fetchone()
+    scored.clear()
+    bot.score_once()
+    assert ("bl", 31) in scored and 31 in scored
