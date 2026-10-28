@@ -1040,8 +1040,11 @@ def log_skip(name, ats, slug, owner):
     print(f"  пропуск: {name} -> {ats}/{slug} принадлежит «{owner}»", file=sys.stderr)
 
 
+# Третья группа — место работы. Имя продукта в company.name (Walt, Tribute) местом
+# не является: раньше оно попадало в location, а «Remote» терялось.
 JOB_IN_PAYLOAD = re.compile(
-    r'\\"id\\":\\"(\d+)\\",\\"position\\":\\"([^"\\]{3,80})\\".{0,400}?\\"company\\":\{\\"name\\":\\"([^"\\]{1,40})\\"')
+    r'\\"id\\":\\"(\d+)\\",\\"position\\":\\"([^"\\]{3,80})\\"'
+    r'(?:,\\"location\\":\\"([^"\\]{0,60})\\")?')
 
 
 def next_data(html):
@@ -1315,8 +1318,9 @@ def embedded(url, with_text=False):
     if not html:
         return None
     base = url.rstrip("/")
-    out = [(f"{base}/{jid}", title.strip(), company.strip(), None)
-           for jid, title, company in JOB_IN_PAYLOAD.findall(html)]
+    # «$undefined» — маркер Next.js для пустого поля, не место работы.
+    out = [(f"{base}/{jid}", title.strip(), "" if place.startswith("$") else place.strip(), None)
+           for jid, title, place in JOB_IN_PAYLOAD.findall(html)]
     rows = (out or jsonld_jobs(html) or next_data(html) or linked_jobs(html, url)
             or notion_jobs(html) or apply_links(html) or flight_jobs(html, url))
     return page_text(rows, url) if rows and with_text else rows

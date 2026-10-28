@@ -36,11 +36,19 @@ def test_posted_date_normalised_from_every_shape():
     assert jobs.posted(None) is None and jobs.posted("") is None
 
 
-def test_embedded_payload_parsed():
-    """top.co держит вакансии в payload Next.js, а не в API."""
-    html = (r'\"id\":\"9699\",\"position\":\"Director of Risk\",\"location\":\"x\",'
-            r'\"company\":{\"name\":\"Wallet\"}')
-    assert jobs.JOB_IN_PAYLOAD.findall(html) == [("9699", "Director of Risk", "Wallet")]
+def test_embedded_payload_parsed(monkeypatch):
+    """top.co держит вакансии в payload Next.js, а не в API. Место работы — поле
+    location, а не имя продукта из company: у Walt и Tribute «Remote» терялся."""
+    html = (r'\"id\":\"9699\",\"position\":\"Director of Risk\",\"location\":\"Remote\",'
+            r'\"company\":{\"name\":\"Wallet\"},'
+            r'{\"id\":\"9700\",\"position\":\"Fullstack Engineer\",\"location\":\"$undefined\",'
+            r'\"company\":{\"name\":\"Walt\"}')
+    assert jobs.JOB_IN_PAYLOAD.findall(html) == [("9699", "Director of Risk", "Remote"),
+                                                 ("9700", "Fullstack Engineer", "$undefined")]
+    monkeypatch.setattr(jobs, "get", lambda u, want_json=True, **k: html)
+    assert jobs.embedded("https://top.co/careers") == [
+        ("https://top.co/careers/9699", "Director of Risk", "Remote", None),
+        ("https://top.co/careers/9700", "Fullstack Engineer", "", None)]
 
 
 def test_every_adapter_is_registered():
