@@ -841,3 +841,31 @@ def test_health_report_lists_sent_per_user():
     assert "Ann (@ann): 1" in text and "Acme — Go Dev (81%)" in text
     assert "Old" not in text and "2: ничего · пауза" in text
 
+
+def test_score_slice_skips_known_rejects(monkeypatch):
+    """Отказ по готовому паспорту не занимает место в срезе: иначе одни и те же
+    отказы стоят в голове очереди каждый проход, а вакансии за ними ждут вечно."""
+    import storage, llm
+    conn = storage.connect()
+    conn.execute("INSERT OR REPLACE INTO profiles(tg_id,data,updated_at) VALUES"
+                 "(25,'{\"level\":\"senior\",\"relocation\":\"да\",\"role\":\"Senior Backend\","
+                 "\"stack\":[\"Go\"]}','2026-10-12')")
+    conn.execute("INSERT OR REPLACE INTO matches(tg_id,job_url,pct,why,scored_at) "
+                 "SELECT 25, url, 0, 'чужая', '2026-10-12' FROM jobs")
+    for url, posted in (("https://s/alien", "2026-10-20"), ("https://s/own", "2026-10-01")):
+        conn.execute("INSERT OR REPLACE INTO jobs(url,company,title,location,source,"
+                     "first_seen,posted,dedup,description) VALUES(?,'Acme','Specialist II',"
+                     "'Porto','lever','2026-10-12',?,?,'текст')", (url, posted, url))
+    conn.execute("INSERT OR REPLACE INTO passports(url,work_mode,role,made_at) "
+                 "VALUES('https://s/alien','remote','sales','2026-10-12')")
+    conn.commit()
+
+    def fake_ask(system, user, **kw):
+        if system is bot.PASSPORT_SYSTEM:
+            return {"items": [{"url": "https://s/own", "work_mode": "remote", "role": "backend"}]}
+        return {"scores": [{"url": "https://s/own", "pct": 80, "why": "ок"}]}
+
+    monkeypatch.setattr(llm, "ask_json", fake_ask)
+    bot.score_pending(conn, 25, limit=1)
+    assert conn.execute("SELECT pct FROM matches WHERE tg_id=25 AND job_url='https://s/own'"
+                        ).fetchone() == (80,)

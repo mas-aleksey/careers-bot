@@ -890,33 +890,38 @@ def score_pending(conn, tg_id, limit=SCORE_SLICE, prefer=()):
     # Ворота по строке локации и названию: бесплатно, на каждом проходе заново.
     # Строки в matches они больше не оставляют — решение воспроизводится
     # функцией за микросекунды, а 19% таблицы на нём не нужны.
-    maybe = [r for r in rows if not gate_reason(profile, r[2], r[3])][:limit]
+    #
+    # Отбор по тегам вместо дешёвой модели: бесплатно, детерминированно и
+    # объяснимо словами. Отказываем только заведомо чужой профессии; стек и
+    # домен двигают вакансию в очереди. Строк в matches отказ не оставляет.
+    mine = get_tags(conn, tg_id, profile)
+
+    def foreign(r, psp):
+        theirs = job_tags(r[2], psp)
+        # Тегов у вакансии нет вовсе — это «не знаю», а не «чужая»: паспорт мог
+        # не построиться, а название оказаться без узнаваемых слов.
+        return bool(mine["role"] and theirs["role"] and theirs["role"] <= FOREIGN_ROLES
+                    and not (mine["role"] & theirs["role"]))
+
+    def keep(r, psps):
+        psp = psps.get(r[0])
+        return not gate_reason(profile, r[2], r[3], psp) and not foreign(r, psp)
+
+    # Отказы не сохраняются, поэтому срез берём после всего бесплатного отбора
+    # по уже готовым паспортам. Иначе он забивался одними и теми же отказами и
+    # вакансии ниже по очереди не получали ни паспорта, ни оценки.
+    maybe = [r for r in rows if not gate_reason(profile, r[2], r[3])]
+    psps = get_passports(conn, [r[0] for r in maybe])
+    maybe = [r for r in maybe if keep(r, psps)][:limit]
     # Паспорта — только на срез: вызов дешёвой модели на вакансию, общий для
     # всех профилей. Поле локации пустое у каждой седьмой вакансии, и без
     # паспорта ворота на ней молчат.
     ensure_passports(conn, maybe)
     psps = get_passports(conn, [r[0] for r in maybe])
-    passed = [r for r in maybe if not gate_reason(profile, r[2], r[3], psps.get(r[0]))]
-    if len(passed) != len(rows):
-        log("gate", tg_id, f"{len(passed)} из {len(rows)}")
-    rows = passed
-
-    # Отбор по тегам вместо дешёвой модели: бесплатно, детерминированно и
-    # объяснимо словами. Отказываем только заведомо чужой профессии; стек и
-    # домен двигают вакансию в очереди. Строк в matches отказ не оставляет:
-    # решение воспроизводится на следующем проходе за микросекунды.
-    mine = get_tags(conn, tg_id, profile)
-    survivors = []
-    for r in rows:
-        theirs = job_tags(r[2], psps.get(r[0]))
-        # Тегов у вакансии нет вовсе — это «не знаю», а не «чужая»: паспорт мог
-        # не построиться, а название оказаться без узнаваемых слов.
-        if (mine["role"] and theirs["role"] and theirs["role"] <= FOREIGN_ROLES
-                and not (mine["role"] & theirs["role"])):
-            continue
-        survivors.append((tag_weight(mine, theirs), r[0] in prefer, r))
-    if len(rows) != len(survivors):
-        log("tags", tg_id, f"{len(survivors)} из {len(rows)}")
+    survivors = [(tag_weight(mine, job_tags(r[2], psps.get(r[0]))), r[0] in prefer, r)
+                 for r in maybe if keep(r, psps)]
+    if len(survivors) != len(rows):
+        log("gate", tg_id, f"{len(survivors)} из {len(rows)}")
     # Сначала верхушка доборки, потом по совпадению тегов.
     rows = [r for _, _, r in sorted(survivors, key=lambda x: (x[1], x[0]), reverse=True)]
 
@@ -1705,7 +1710,10 @@ def main():
     threading.Thread(target=worker_loop, daemon=True).start()
     last_deliver = 0.0
     while True:
-        ups = call("getUpdates", offset=offset, timeout=50) or []
+        ups = call("getUpdates", offset=offset, timeout=50)
+        if ups is None:
+            time.sleep(5)        # 502 у телеграма приходит сразу: без паузы — сотни запросов за минуту
+            ups = []
         for u in ups:
             offset = u["update_id"] + 1
             try:
