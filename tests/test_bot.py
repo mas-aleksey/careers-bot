@@ -820,3 +820,24 @@ def test_pause_stops_scoring_and_resume_schedules_backlog(monkeypatch):
     scored.clear()
     bot.score_once()
     assert ("bl", 31) in scored and 31 in scored
+
+
+def test_health_report_lists_sent_per_user():
+    """В отчёте админу — кому что ушло за сутки, вчерашнее не считается."""
+    import storage
+    c = storage.connect()
+    c.execute("DELETE FROM users"); c.execute("DELETE FROM sent")
+    c.execute("INSERT INTO users(tg_id,username,paused) VALUES(1,'ann',0),(2,NULL,1)")
+    c.execute("INSERT OR REPLACE INTO profiles(tg_id,data) VALUES(1,'{\"name\":\"Ann\"}')")
+    c.execute("INSERT OR REPLACE INTO jobs(url,company,title,dedup) VALUES"
+              "('u1','Acme','Go Dev','d1'),('u2','Beta','Old','d2')")
+    c.execute("INSERT OR REPLACE INTO matches(tg_id,job_url,pct,why) VALUES(1,'u1',81,'')")
+    c.execute("INSERT INTO sent(tg_id,job_url,sent_at) VALUES"
+              "(1,'u1',strftime('%Y-%m-%dT%H:%M:%S+00:00','now','-1 hour')),"
+              "(1,'u2',strftime('%Y-%m-%dT%H:%M:%S+00:00','now','-25 hours'))")
+    c.commit()
+    text = "\n".join(bot.sent_report(c))
+    c.close()
+    assert "Ann (@ann): 1" in text and "Acme — Go Dev (81%)" in text
+    assert "Old" not in text and "2: ничего · пауза" in text
+

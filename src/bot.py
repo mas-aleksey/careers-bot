@@ -1572,6 +1572,7 @@ def health_report(conn):
         lines.append("<b>Движение по компаниям:</b>")
         for name, plus, minus in movers:
             lines.append(f"· {esc(name)}: +{plus} / −{minus}")
+    lines += sent_report(conn)
     if silent:
         lines.append("")
         lines.append("⚠️ <b>Не отдают вакансии:</b>")
@@ -1586,6 +1587,32 @@ def health_report(conn):
     lines.append("")
     lines.append(money_line())
     return "\n".join(lines)
+
+
+def sent_report(conn, per_user=5):
+    """Кому что ушло за сутки. По пользователю — счёт и верхушка по проценту;
+    весь список не влезет в одно сообщение телеграма уже на сотне карточек."""
+    # sent_at пишется ISO с «T», datetime('now') — с пробелом: строки сравнились бы
+    # неверно в пределах суток, поэтому порог в том же формате.
+    since = "strftime('%Y-%m-%dT%H:%M:%S', 'now', '-1 day')"
+    out = ["", "<b>Ушло за сутки:</b>"]
+    for tg_id, username, name, paused in conn.execute(
+            "SELECT u.tg_id, u.username, json_extract(p.data, '$.name'), u.paused "
+            "FROM users u LEFT JOIN profiles p USING(tg_id) ORDER BY u.tg_id"):
+        rows = conn.execute(f"""
+            SELECT j.company, j.title, m.pct FROM sent s
+            JOIN jobs j ON j.url = s.job_url
+            LEFT JOIN matches m ON m.tg_id = s.tg_id AND m.job_url = s.job_url
+            WHERE s.tg_id = ? AND s.sent_at > {since}
+            ORDER BY m.pct DESC""", (tg_id,)).fetchall()
+        who = esc(name or str(tg_id)) + (f" (@{esc(username)})" if username else "")
+        mark = " · пауза" if paused else ""
+        out.append(f"· {who}: {len(rows) or 'ничего'}{mark}")
+        for company, title, pct in rows[:per_user]:
+            out.append(f"   {esc(company)} — {esc(title)}" + (f" ({pct}%)" if pct is not None else ""))
+        if len(rows) > per_user:
+            out.append(f"   и ещё {len(rows) - per_user}")
+    return out
 
 
 LOW_BALANCE = 3.0   # долларов: при нынешних ~$0.5 в день это неделя запаса
