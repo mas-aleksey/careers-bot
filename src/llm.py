@@ -6,7 +6,10 @@
 """
 import json, os, re, time, urllib.error, urllib.request
 
-URL = "https://openrouter.ai/api/v1/chat/completions"
+# Хост в формате OpenAI, без /v1. По умолчанию OpenRouter; свой пул подписок Claude —
+# OPENROUTER_HOST=http://claude-pool:8080 и ключ пула в OPENROUTER_API_KEY.
+HOST = os.environ.get("OPENROUTER_HOST", "https://openrouter.ai/api").rstrip("/")
+URL = f"{HOST}/v1/chat/completions"
 KEY = os.environ.get("OPENROUTER_API_KEY", "")
 MODEL = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-sonnet-5")
 # Первый проход — отсев заведомо чужих профессий. Втрое дешевле не бывает:
@@ -18,23 +21,6 @@ RETRY_CODES = (408, 409, 429, 500, 502, 503, 504)
 
 class LLMError(RuntimeError):
     pass
-
-
-def balance():
-    """Остаток на счёте OpenRouter в долларах или None, если узнать не вышло.
-
-    Запрос бесплатный, моделей не зовёт. Нужен затем, что кончившиеся деньги
-    выглядят как тишина: 2026-10-14 бот шесть часов получал 402 на оценку,
-    а в отчёте это было неотличимо от спокойного дня."""
-    if not KEY:
-        return None
-    try:
-        req = urllib.request.Request("https://openrouter.ai/api/v1/credits",
-                                     headers={"Authorization": f"Bearer {KEY}"})
-        d = json.loads(urllib.request.urlopen(req, timeout=15).read()).get("data") or {}
-        return float(d["total_credits"]) - float(d["total_usage"])
-    except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError):
-        return None
 
 
 def build(messages, model=None, max_tokens=4096, json_mode=False):

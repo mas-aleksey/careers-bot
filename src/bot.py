@@ -1589,8 +1589,6 @@ def health_report(conn):
         lines.append("Пусто, но доска отвечает: " + ", ".join(esc(n) for n, in empty[:10]))
     if not silent and not empty:
         lines.append("Все источники отвечают.")
-    lines.append("")
-    lines.append(money_line())
     return "\n".join(lines)
 
 
@@ -1618,21 +1616,6 @@ def sent_report(conn, per_user=5):
         if len(rows) > per_user:
             out.append(f"   и ещё {len(rows) - per_user}")
     return out
-
-
-LOW_BALANCE = 3.0   # долларов: при нынешних ~$0.5 в день это неделя запаса
-
-
-def money_line():
-    """Строка про остаток на OpenRouter. Не узнали — так и пишем: молчание
-    здесь опаснее, чем лишняя строка."""
-    import llm
-    left = llm.balance()
-    if left is None:
-        return "OpenRouter: остаток узнать не удалось"
-    if left < LOW_BALANCE:
-        return f"⚠️ <b>OpenRouter: остаток ${left:.2f}</b> — пополните, иначе оценка встанет"
-    return f"OpenRouter: остаток ${left:.2f}"
 
 
 def daily_health(conn):

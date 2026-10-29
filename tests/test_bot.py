@@ -775,17 +775,6 @@ def test_score_prompt_treats_avoid_as_blocker():
     assert "avoid" in bot.SCORE_SYSTEM
 
 
-def test_money_line_warns_on_low_balance(monkeypatch):
-    """Кончившиеся деньги выглядят как тишина — отчёт должен сказать прямо."""
-    import llm
-    monkeypatch.setattr(llm, "balance", lambda: 9.731)
-    assert bot.money_line() == "OpenRouter: остаток $9.73"
-    monkeypatch.setattr(llm, "balance", lambda: 1.2)
-    assert "⚠️" in bot.money_line() and "$1.20" in bot.money_line()
-    monkeypatch.setattr(llm, "balance", lambda: None)
-    assert "не удалось" in bot.money_line()
-
-
 def test_north_america_in_location_blocks_but_not_with_europe():
     """«Remote, North America» в поле локации ворота не узнавали: в справочнике
     мест было americas, а это другое слово. Вместе с EU — проходит."""
@@ -869,3 +858,4 @@ def test_score_slice_skips_known_rejects(monkeypatch):
     bot.score_pending(conn, 25, limit=1)
     assert conn.execute("SELECT pct FROM matches WHERE tg_id=25 AND job_url='https://s/own'"
                         ).fetchone() == (80,)
+
