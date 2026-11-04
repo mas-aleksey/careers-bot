@@ -757,6 +757,8 @@ def test_atlassian_shortens_locations_and_skips_apply_url(monkeypatch):
 
 PF_PAGE1 = ('<a class="stretched-link tw-text-black" data-turbo-frame="_top"'
             ' href="/v/238101-senior-devops-engineer">Senior Devops &amp; Engineer</a>'
+            '<a class="tw-stretched-link tw-text-black" data-turbo-frame="_top"'
+            ' href="/v/245310-ai-operations-lead">AI Operations Lead</a>'
             '<a class="other" href="/v/1-not-a-card">Чужая ссылка</a>')
 
 
@@ -770,9 +772,10 @@ def test_peopleforce_pages_until_nothing_new(monkeypatch):
 
     monkeypatch.setattr(jobs, "get", fake_get)
     rows = jobs.peopleforce("careers.taxdome.com")
-    assert len(rows) == 1                       # вторая страница не добавила нового
-    # страница списка, страница самой вакансии, вторая страница списка
-    assert len(seen) == 3                       # и дальше не ходим
+    # класс с префиксом Tailwind — та же карточка: на нём TaxDome с 2026-10-31
+    assert [r[1] for r in rows] == ["Senior Devops & Engineer", "AI Operations Lead"]
+    # страница списка, две страницы вакансий, вторая страница списка
+    assert len(seen) == 4                       # и дальше не ходим
     url, title, where, when = rows[0][:4]
     assert url == "https://careers.taxdome.com/v/238101-senior-devops-engineer"
     assert title == "Senior Devops & Engineer"
@@ -1077,3 +1080,4 @@ def test_jsonld_prefers_hiring_countries_for_remote():
     assert "Go и k8s" in rows[0][6]
     assert jobs.jsonld_jobs("<html>без разметки</html>") == []
     assert jobs.jsonld_jobs('<script type="application/ld+json">не json</script>') == []
+

@@ -665,7 +665,8 @@ def atlassian(s):
                         j.get("responsibilities"), j.get("qualifications")))))))
     return out or None
 
-PF_JOB = re.compile(r'<a class="stretched-link[^"]*"[^>]*href="(?P<href>/v/[^"]+)"[^>]*>'
+# Класс бывает с префиксом Tailwind: TaxDome 2026-10-31 сменил на tw-stretched-link.
+PF_JOB = re.compile(r'<a class="(?:tw-)?stretched-link[^"]*"[^>]*href="(?P<href>/v/[^"]+)"[^>]*>'
                     r'(?P<title>[^<]{3,100})</a>')
 
 
