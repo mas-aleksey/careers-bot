@@ -235,13 +235,17 @@ def lever_text(j):
 def lever(s):
     """У европейских аккаунтов свой хост: CoinsPaid живёт на api.eu.lever.co,
     на api.lever.co его нет вовсе."""
+    answered = False
     for host in ("api.lever.co", "api.eu.lever.co"):
         d = get(f"https://{host}/v0/postings/{s}?mode=json")
         if isinstance(d, list) and d:
             return [(j["hostedUrl"], j["text"], j.get("categories", {}).get("location", ""),
                      posted(j.get("createdAt")), None, "", lever_text(j))
                     for j in d]
-    return None
+        answered = answered or isinstance(d, list)
+    # Оба хоста ответили списком, но пустым: у компании нет вакансий, формат цел.
+    # None остаётся для «не ответили вовсе» — его collect отдаёт на диагностику.
+    return [] if answered else None
 
 
 # Текста в списке SmartRecruiters нет, он лежит в карточке — отдельный запрос

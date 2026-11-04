@@ -1081,3 +1081,14 @@ def test_jsonld_prefers_hiring_countries_for_remote():
     assert jobs.jsonld_jobs("<html>без разметки</html>") == []
     assert jobs.jsonld_jobs('<script type="application/ld+json">не json</script>') == []
 
+
+def test_lever_empty_board_is_empty_not_broken(monkeypatch):
+    """Пустой список на обоих хостах — у компании нет вакансий: [] вместо None, иначе
+    отчёт пишет «сменился формат». Молчание хостов остаётся None."""
+    monkeypatch.setattr(jobs, "get", lambda u, **k: [])
+    assert jobs.lever("appfollow") == []
+    monkeypatch.setattr(jobs, "get", lambda u, **k: None)
+    assert jobs.lever("appfollow") is None
+    eu = [{"hostedUrl": "https://jobs.eu.lever.co/x/1", "text": "Dev", "descriptionPlain": "т"}]
+    monkeypatch.setattr(jobs, "get", lambda u, **k: eu if "api.eu." in u else [])
+    assert [r[1] for r in jobs.lever("coinspaid")] == ["Dev"]
