@@ -28,6 +28,8 @@ Eleven ATS providers through their public APIs, no keys required: **Greenhouse,
 Ashby, Lever** (including the EU host), **SmartRecruiters, Workable, Recruitee,
 Teamtailor, Pinpoint, Personio** (XML feed), **Revolut People**, plus the
 WordPress REST API and openings embedded straight into a Next.js page.
+Revolut's own site sits behind a Cloudflare challenge, so it is read through
+a shared headless Chromium over CDP (`BROWSER_URL`).
 
 Given a company name or a link, the bot tries each provider until a board
 answers. Roughly half of the companies you throw at it turn out to have one.

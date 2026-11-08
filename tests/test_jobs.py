@@ -1092,3 +1092,24 @@ def test_lever_empty_board_is_empty_not_broken(monkeypatch):
     eu = [{"hostedUrl": "https://jobs.eu.lever.co/x/1", "text": "Dev", "descriptionPlain": "т"}]
     monkeypatch.setattr(jobs, "get", lambda u, **k: eu if "api.eu." in u else [])
     assert [r[1] for r in jobs.lever("coinspaid")] == ["Dev"]
+
+
+def test_revolut_builds_url_and_fetches_only_missing_texts(monkeypatch):
+    """Список без текста, карточку тянем только тем, у кого текста ещё нет."""
+    asked = []
+
+    def js(expr):
+        if expr is jobs.REVOLUT_LIST:
+            return [{"id": "aa57", "text": "Credit Manager (Policy)", "where": "New Zealand - Remote"},
+                    {"id": "bb01", "text": "Backend Engineer (Java)", "where": "Portugal - Remote"}]
+        asked.append(expr)
+        return {"backend-engineer-java-bb01": "<p>Строим банк</p>"}
+
+    monkeypatch.setattr(jobs, "in_browser", lambda url, work: work(js))
+    old = "https://www.revolut.com/careers/position/credit-manager-policy-aa57/"
+    rows = jobs.revolut("www.revolut.com", described={old})
+    assert [r[0] for r in rows] == [old, "https://www.revolut.com/careers/position/backend-engineer-java-bb01/"]
+    assert rows[1][1:3] == ("Backend Engineer (Java)", "Portugal - Remote")
+    assert (rows[0][6], rows[1][6]) == (None, "Строим банк")
+    assert len(asked) == 1 and "credit-manager" not in asked[0]
+    assert jobs.from_url("https://www.revolut.com/en-PT/careers/") == ("revolut", "www.revolut.com")

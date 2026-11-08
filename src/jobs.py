@@ -123,6 +123,7 @@ ATS_IN_URL = [
     ("peopleforce", r"(careers\.[a-z0-9.-]+)/v/\d+-"),
     ("revolutpeople", r"([a-z0-9-]+)\.revolutpeople\.com"),
     ("revolutpeople", r"revolutpeople\.com/([a-z0-9-]+)/"),
+    ("revolut", r"(www\.revolut\.com)/(?:[a-z]{2}-[A-Z]{2}/)?careers"),
     ("pinpoint", r"([a-z0-9-]+)\.pinpointhq\.com"),
 ]
 
@@ -543,6 +544,94 @@ def _wp_type(host, kind):
                         plain_text((j.get("content") or {}).get("rendered", ""))))
     return out
 
+def title_slug(title):
+    """Слаг заголовка, как его строят Revolut и Revolut People."""
+    return re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", title.lower())).strip("-")
+
+
+def in_browser(url, work, ready="!!window.__NEXT_DATA__"):
+    """Вкладка в общем Chromium (services/infra/browser, профиль по BROWSER_URL).
+    Ждёт, пока ready станет истиной, и отдаёт work функцию js(выражение).
+    Голый CDP поверх вебсокета, как у digest в Cronicle: playwright ради одной
+    вкладки тяжёл. None — браузера нет или страница не открылась за минуту."""
+    base = os.environ.get("BROWSER_URL", "").rstrip("/")
+    if not base:
+        return None
+    from websockets.sync.client import connect
+    try:
+        ws_url = get(base + "/json/version")["webSocketDebuggerUrl"]
+        with connect(ws_url, max_size=None, open_timeout=TIMEOUT) as ws:
+            n = 0
+
+            def call(method, sid=None, **params):
+                nonlocal n
+                n += 1
+                ws.send(json.dumps({"id": n, "method": method, "params": params,
+                                    **({"sessionId": sid} if sid else {})}))
+                while (r := json.loads(ws.recv(timeout=120))).get("id") != n:
+                    pass  # события CDP пропускаем
+                if "error" in r:
+                    raise RuntimeError(f"{method}: {r['error']}")
+                return r["result"]
+
+            tid = call("Target.createTarget", url=url)["targetId"]
+            try:
+                sid = call("Target.attachToTarget", targetId=tid, flatten=True)["sessionId"]
+
+                def js(expr):
+                    r = call("Runtime.evaluate", sid, expression=expr,
+                             awaitPromise=True, returnByValue=True)
+                    if "exceptionDetails" in r:
+                        raise RuntimeError(r["exceptionDetails"].get("text"))
+                    return r["result"].get("value")
+
+                for _ in range(60):
+                    try:
+                        if js(ready):
+                            break
+                    except RuntimeError:
+                        pass  # контекст пересоздаётся, пока идёт навигация
+                    time.sleep(1)
+                else:
+                    return None
+                return work(js)
+            finally:
+                call("Target.closeTarget", targetId=tid)
+    except Exception as e:
+        print(f"  браузер: {url}: {e!r}", file=sys.stderr)
+        return None
+
+
+REVOLUT_LIST = """window.__NEXT_DATA__.props.pageProps.positions.map(p => ({
+  id: p.id, text: p.text, where: (p.locations || []).map(l => l.name).join(', ')}))"""
+REVOLUT_TEXTS = """(async slugs => {
+  const d = window.__NEXT_DATA__, out = {};
+  for (const s of slugs) {
+    const r = await fetch(`/_next/data/${d.buildId}/${d.locale}/careers/position/${s}.json`);
+    if (r.ok) out[s] = ((await r.json()).pageProps.position || {}).description || '';
+  }
+  return out })(%s)"""
+REVOLUT_BATCH = 20   # карточек за один вызов: ответ CDP ждём не дольше двух минут
+
+
+def revolut(host, described=()):
+    """revolut.com целиком закрыт Cloudflare, пускает только браузер. Список —
+    __NEXT_DATA__ страницы карьеры, там все вакансии, но без текста. Текст —
+    JSON-маршрут Next.js на карточку, только у тех, у кого его ещё нет.
+    Даты публикации Revolut не отдаёт."""
+    def work(js):
+        found = js(REVOLUT_LIST) or []
+        slugs = {j["id"]: f"{title_slug(j['text'])}-{j['id']}" for j in found}
+        url = lambda j: f"https://{host}/careers/position/{slugs[j['id']]}/"
+        todo = [slugs[j["id"]] for j in found if url(j) not in described]
+        texts = {}
+        for i in range(0, len(todo), REVOLUT_BATCH):
+            texts.update(js(REVOLUT_TEXTS % json.dumps(todo[i:i + REVOLUT_BATCH])) or {})
+        return [(url(j), j["text"], j["where"], None, None, "",
+                 plain_text(texts.get(slugs[j["id"]]))) for j in found] or None
+    return in_browser(f"https://{host}/careers/", work)
+
+
 def revolutpeople(s):
     """Revolut People. Ссылку API не отдаёт, она собирается из слага заголовка
     и id: revolutpeople.com/<tenant>/public/careers/position/<slug>-<id>.
@@ -556,7 +645,7 @@ def revolutpeople(s):
     out = []
     for j in d:
         title = j.get("title") or ""
-        slug = re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", title.lower())).strip("-")
+        slug = title_slug(title)
         where = ", ".join(f"{l.get('name')} ({l.get('type')})"
                           for l in j.get("locations", []) if l.get("name"))
         # Карточка вакансии по API открывается, хотя та же страница на сайте
@@ -1012,6 +1101,7 @@ ADAPTERS = {"ashby": ashby, "phenom": phenom, "successfactors": successfactors,
             "bamboohr": bamboohr,
             "wordpress": wordpress,
             "revolutpeople": revolutpeople,
+            "revolut": revolut,
             "aristek": aristek,
             "atlassian": atlassian,
             "epam": epam,
@@ -1389,6 +1479,8 @@ def collect(name, url, cache, known=(), described=()):
         return name, ats, slug, oracle(slug, described), None
     if ats == "comeet":
         return name, ats, slug, comeet(slug, described), None
+    if ats == "revolut":
+        return name, ats, slug, revolut(slug, described), None
     if ats:
         # None (доска не ответила) не схлопывать в []: иначе 429 от Workable
         # попадает в отчёт как «доска вернула пустой список» и diagnose молчит
