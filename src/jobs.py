@@ -526,7 +526,9 @@ def wp_places(rows, known):
     return out
 
 
-WP_TYPES = ("jobs", "vacancy", "vacancies", "job_listing", "careers")
+# awsm_job_openings — плагин WP Job Openings: у него свой тип записи, и сайт
+# вроде Gilytics отдаёт через REST только его, страница со ссылками без id.
+WP_TYPES = ("jobs", "vacancy", "vacancies", "job_listing", "careers", "awsm_job_openings")
 
 
 def _wp_type(host, kind):

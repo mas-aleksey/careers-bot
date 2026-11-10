@@ -594,6 +594,18 @@ def test_wordpress_finds_the_post_type_when_slug_has_none(monkeypatch):
     assert any("/wp/v2/vacancy?" in u for u in seen)
 
 
+
+def test_wordpress_finds_wp_job_openings_plugin(monkeypatch):
+    """Плагин WP Job Openings регистрирует тип awsm_job_openings, других нет."""
+    def fake_get(url, **kw):
+        if "/awsm_job_openings?" in url:
+            return WP_PAGE if url.endswith("&page=1") else []
+        return {"code": "rest_no_route"}
+
+    monkeypatch.setattr(jobs, "get", fake_get)
+    rows = jobs.wordpress("x.test")
+    assert [r[1] for r in rows] == ["Backend – Senior"]
+
 FINDEV_HTML = """
 <a href="/career/open-positions/senior-java-developer-storm-4256535">
   <div><h3>Java developer (STORM)</h3><span>Senior</span>
