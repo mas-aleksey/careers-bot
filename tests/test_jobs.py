@@ -226,6 +226,25 @@ def test_discover_ignores_an_empty_board(monkeypatch):
     assert jobs.discover("Zeta", "") == ("lever", "zeta")
 
 
+def test_discover_skips_bamboohr_trial(monkeypatch):
+    """Пробный аккаунт BambooHR отдаёт шаблонные вакансии самого BambooHR под
+    именем компании: имя совпадает, вакансии чужие."""
+    import jobs
+    monkeypatch.setattr(jobs, "from_url", lambda u: None)
+    monkeypatch.setattr(jobs, "slug_variants", lambda n: ["zeta"])
+    for name in jobs.ADAPTERS:
+        monkeypatch.setitem(jobs.ADAPTERS, name, lambda s: [])
+    monkeypatch.setitem(jobs.ADAPTERS, "bamboohr",
+                        lambda s: [("u", "Marketing Manager", "Marseille", None)])
+    info = {"name": "ZETA", "inTrial": True}
+    monkeypatch.setattr(jobs, "get", lambda url, **kw:
+                        {"meta": [], "result": info} if "company-info" in url else None)
+    assert jobs.discover("Zeta", "") is None
+    info["inTrial"] = False
+    assert jobs.discover("Zeta", "") == ("bamboohr", "zeta")
+    info["name"] = "Other Corp"
+    assert jobs.discover("Zeta", "") is None
+
 WORKABLE_PAYLOAD = [
     {"shortcode": "AAA", "title": "Platform Engineer", "url": "https://w/j/AAA",
      "telecommuting": "True", "country": "United States", "city": "Austin",

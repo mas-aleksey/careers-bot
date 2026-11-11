@@ -160,7 +160,21 @@ def board_owner(ats, slug):
     if ats == "recruitee":
         d = get(f"https://{slug}.recruitee.com/api/offers/")
         return ((d or {}).get("offers") or [{}])[0].get("company_name")
+    if ats == "bamboohr":
+        return (bb_info(slug) or {}).get("name")
     return None
+
+
+def bb_info(slug):
+    d = get(f"https://{slug}.bamboohr.com/careers/company-info")
+    return (d or {}).get("result") if isinstance(d, dict) else None
+
+
+def demo_board(ats, slug):
+    """Пробный аккаунт BambooHR приходит с шаблонными вакансиями самого BambooHR
+    («set people free to do meaningful work») — у BCRAFT четыре такие в Лондоне,
+    Берлине и Марселе. Имя аккаунта совпадает, так что board_owner не спасает."""
+    return ats == "bamboohr" and bool((bb_info(slug) or {}).get("inTrial"))
 
 
 def slug_variants(name):
@@ -1126,6 +1140,9 @@ def discover(name, url):
             owner = board_owner(ats, s)
             if owner and not same_company(name, owner):
                 log_skip(name, ats, s, owner)
+                continue
+            if demo_board(ats, s):
+                log_skip(name, ats, s, "пробный аккаунт")
                 continue
             return ats, s
     return None
