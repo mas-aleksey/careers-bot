@@ -883,6 +883,23 @@ def test_peopleforce_reads_text_from_job_page(monkeypatch):
     assert rows[0][6] == "Backend Engineer Python, 5+ years"
 
 
+def test_peopleforce_on_own_subdomain(monkeypatch):
+    """Витрина на поддомене PeopleForce: адрес <клиент>.peopleforce.io/careers,
+    ссылки на вакансии с префиксом /careers/v/."""
+    assert jobs.from_url("https://acme.peopleforce.io/careers") == \
+        ("peopleforce", "acme.peopleforce.io/careers")
+    listing = ('<a class="tw-stretched-link tw-text-black" data-turbo-frame="_top" '
+               'href="/careers/v/42-backend-engineer">Backend Engineer\n</a>')
+    pages = {"https://acme.peopleforce.io/careers?page=1": listing,
+             "https://acme.peopleforce.io/careers/v/42-backend-engineer":
+                 "<h1>Backend Engineer</h1><p>Go</p>"}
+    monkeypatch.setattr(jobs, "get", lambda url, **kw: pages.get(url))
+    rows = jobs.peopleforce("acme.peopleforce.io/careers")
+    assert [(r[0], r[1]) for r in rows] == [
+        ("https://acme.peopleforce.io/careers/v/42-backend-engineer", "Backend Engineer")]
+    assert rows[0][6] == "Backend Engineer Go"
+
+
 EPAM_FACETS = {"country": [{"key": "Portugal", "id": "406", "doc_count": 52},
                            {"key": "Mexico", "id": "405", "doc_count": 1055}]}
 EPAM_JOB = {"name": "Senior Python Developer", "vacancy_type": "Remote",

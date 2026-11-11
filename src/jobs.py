@@ -121,6 +121,8 @@ ATS_IN_URL = [
     ("personio", r"([a-z0-9-]+)\.jobs\.personio\.de"),
     ("bamboohr", r"([a-z0-9-]+)\.bamboohr\.com"),
     ("peopleforce", r"(careers\.[a-z0-9.-]+)/v/\d+-"),
+    # витрина на поддомене самого PeopleForce: <клиент>.peopleforce.io/careers
+    ("peopleforce", r"([a-z0-9-]+\.peopleforce\.io/careers)"),
     ("revolutpeople", r"([a-z0-9-]+)\.revolutpeople\.com"),
     ("revolutpeople", r"revolutpeople\.com/([a-z0-9-]+)/"),
     ("revolut", r"(www\.revolut\.com)/(?:[a-z]{2}-[A-Z]{2}/)?careers"),
@@ -759,7 +761,7 @@ def atlassian(s):
     return out or None
 
 # Класс бывает с префиксом Tailwind: TaxDome 2026-10-31 сменил на tw-stretched-link.
-PF_JOB = re.compile(r'<a class="(?:tw-)?stretched-link[^"]*"[^>]*href="(?P<href>/v/[^"]+)"[^>]*>'
+PF_JOB = re.compile(r'<a class="(?:tw-)?stretched-link[^"]*"[^>]*href="(?P<href>(?:/careers)?/v/[^"]+)"[^>]*>'
                     r'(?P<title>[^<]{3,100})</a>')
 
 
