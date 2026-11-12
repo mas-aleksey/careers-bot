@@ -398,6 +398,33 @@ def test_comeet_reads_positions_from_page(monkeypatch):
     assert jobs.comeet("example.com/careers") is None
 
 
+COMEET_HOSTED = """<script>
+COMPANY_DATA = {"name": "Acme"};
+COMPANY_POSITIONS_DATA = [{"name": "Data Engineer ", "uid": "AC.F50", "is_internal": false,
+ "url_comeet_hosted_page": "https://www.comeet.com/jobs/acme/98.008/data-engineer/AC.F50",
+ "location": {"name": "Poland", "country": "PL", "city": "Warszawa"}, "workplace_type": "Remote",
+ "custom_fields": {"details": [{"name": "Requirements", "value": "<p>Нужен <b>dbt</b></p>"}]}},
+ {"name": "Внутренняя", "is_internal": true, "url_comeet_hosted_page": "https://x/y"}];
+</script>"""
+
+
+def test_comeet_hosted_page(monkeypatch):
+    """Своя витрина Comeet: вакансии одним JSON в странице, текст рядом,
+    разметки comeet-position нет. Слаг берётся из ссылки."""
+    import jobs
+    assert jobs.from_url("https://www.comeet.com/jobs/acme/98.008") == \
+        ("comeet", "www.comeet.com/jobs/acme/98.008")
+    seen = []
+    monkeypatch.setattr(jobs, "get", lambda u, want_json=True, **k: seen.append(u) or COMEET_HOSTED)
+    got = jobs.comeet("www.comeet.com/jobs/acme/98.008")
+    assert seen == ["https://www.comeet.com/jobs/acme/98.008"]   # текст без доп. запросов
+    assert len(got) == 1                                          # внутренняя отброшена
+    url, title, where = got[0][:3]
+    assert url.endswith("/data-engineer/AC.F50") and title == "Data Engineer"
+    assert where == "Remote: Warszawa, Poland"
+    assert "dbt" in got[0][6] and "<b>" not in got[0][6]
+
+
 def test_oracle_fetches_text_only_for_new(monkeypatch):
     """Описание лежит в отдельном ресурсе. Дочитываем только то, чего нет в
     базе, и не больше ORACLE_TEXT_MAX за проход."""

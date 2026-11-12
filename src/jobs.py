@@ -127,6 +127,8 @@ ATS_IN_URL = [
     ("revolutpeople", r"revolutpeople\.com/([a-z0-9-]+)/"),
     ("revolut", r"(www\.revolut\.com)/(?:[a-z]{2}-[A-Z]{2}/)?careers"),
     ("pinpoint", r"([a-z0-9-]+)\.pinpointhq\.com"),
+    # своя витрина Comeet: comeet.com/jobs/<компания>/<id>, слаг — адрес без схемы
+    ("comeet", r"((?:www\.)?comeet\.com/jobs/[a-z0-9-]+/[0-9A-Z.]+)"),
 ]
 
 
@@ -932,6 +934,8 @@ def comeet(s, have_text=()):
     склеиваем через urljoin, иначе в базу уедет битый url. Текста вакансии на
     странице списка нет."""
     page = get(f"https://{s}", want_json=False)
+    if isinstance(page, str) and "COMPANY_POSITIONS_DATA" in page:
+        return comeet_hosted(page)
     if not page or "comeet-position" not in page:
         return None
     out, left = [], COMEET_TEXT_MAX
@@ -951,6 +955,35 @@ def comeet(s, have_text=()):
         out.append((url, plain_text(link.group(2)) or "",
                     place.split("·")[0].strip(),
                     None, None, "", text))
+    return out or None
+
+
+COMEET_DATA = re.compile(r'COMPANY_POSITIONS_DATA\s*=\s*(\[.*?\]);\s*\n', re.S)
+
+
+def comeet_hosted(page):
+    """Своя витрина Comeet (comeet.com/jobs/<компания>/<id>): все вакансии одним
+    JSON в странице, текст в custom_fields — отдельных запросов не нужно.
+    У TripleTen так лежат 288 вакансий, разметки comeet-position там нет."""
+    m = COMEET_DATA.search(page)
+    try:
+        data = json.loads(m.group(1)) if m else None
+    except ValueError:
+        return None
+    out = []
+    for p in data or []:
+        url = p.get("url_comeet_hosted_page") or p.get("url_active_page")
+        if not url or p.get("is_internal"):
+            continue
+        loc = p.get("location") or {}
+        where = ", ".join(x for x in (loc.get("city"), loc.get("name")) if x)
+        if p.get("workplace_type") == "Remote":
+            where = f"Remote: {where}" if where else "Remote"
+        details = (p.get("custom_fields") or {}).get("details") or []
+        text = plain_text(" ".join(f"{d.get('name') or ''}: {d.get('value') or ''}"
+                                   for d in details if d.get("value")))
+        out.append((url, (p.get("name") or "").strip(), where,
+                    None, None, "", text or None))
     return out or None
 
 
