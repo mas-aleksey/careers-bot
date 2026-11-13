@@ -335,6 +335,7 @@ def test_collect_due_counts_from_last_check_not_from_start():
     from datetime import datetime, timedelta, timezone
     conn = storage.connect()
     conn.execute("DELETE FROM companies")
+    conn.execute("DELETE FROM meta WHERE key='collected_at'")
     assert bot.collect_due_in(conn) == 0          # пустой реестр — идём сразу
 
     def put(hours_ago):
@@ -351,6 +352,28 @@ def test_collect_due_counts_from_last_check_not_from_start():
     conn.commit()
     assert bot.collect_due_in(conn) == 0           # мусор в поле не вешает цикл
 
+
+def test_single_company_run_does_not_postpone_the_collection(monkeypatch):
+    """/add и прогон одной компании двигают её checked_at, но не расписание:
+    иначе компания, добавленная перед обходом, откладывала весь обход на четыре
+    часа. Срок считается от полного обхода."""
+    import jobs, storage
+    from datetime import datetime, timedelta, timezone
+    conn = storage.connect()
+    conn.execute("DELETE FROM companies")
+    old = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat(timespec="seconds")
+    conn.execute("INSERT INTO companies(name,page_url,ats,slug,checked_at) "
+                 "VALUES('Acme','https://acme.test','lever','acme',?)", (old,))
+    conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('collected_at',?)", (old,))
+    conn.commit()
+    monkeypatch.setitem(jobs.ADAPTERS, "lever",
+                        lambda s: [(f"https://acme.test/{s}/1", "Backend", "Remote", None)])
+
+    jobs.run(only="Acme")                          # checked_at у Acme — сейчас
+    assert bot.collect_due_in(conn) == 0           # а обход всё равно пора
+
+    jobs.run()                                     # полный обход сдвигает срок
+    assert 3.9 * 3600 < bot.collect_due_in(conn) <= 4 * 3600
 
 def test_deliver_commits_before_the_next_send(monkeypatch):
     """Сеть внутри открытой транзакции держит базу: коммит до следующей

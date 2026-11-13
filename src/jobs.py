@@ -1679,6 +1679,11 @@ def run(only=None):
         why = diagnose(ats, slug, url)
         conn.execute("UPDATE companies SET last_error=? WHERE name=?", (why, name))
         conn.commit()
+    if not only:
+        # Метка полного обхода — от неё бот считает следующий. Пишется в конце:
+        # упавший сборщик её не двигает, и обход повторится.
+        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('collected_at', ?)", (now,))
+        conn.commit()
     return new, changed, stats, skipped, reopened
 
 
