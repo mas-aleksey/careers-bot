@@ -1635,9 +1635,12 @@ def collect_due_in(conn):
     от старта процесса: иначе каждая пересборка образа сдвигает расписание, и
     после рестарта вскоре после обхода следующий приходит через восемь часов.
 
-    Отдельного поля не нужно — companies.checked_at обновляется только у
-    реально проверенных, и прогон, пропустивший всех как свежих, его не двигает."""
-    row = conn.execute("SELECT max(checked_at) FROM companies").fetchone()
+    Отсчёт от meta.collected_at — его пишет только полный обход. По
+    companies.checked_at нельзя: его двигает и /add, и ручной прогон одной
+    компании, и тогда весь обход откладывался на четыре часа. max(checked_at) —
+    запасной путь для базы, где полного обхода с этой меткой ещё не было."""
+    row = (conn.execute("SELECT value FROM meta WHERE key='collected_at'").fetchone()
+           or conn.execute("SELECT max(checked_at) FROM companies").fetchone())
     if not row or not row[0]:
         return 0                      # пустой реестр — идём сразу
     try:
