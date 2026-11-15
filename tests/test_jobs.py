@@ -1188,3 +1188,65 @@ def test_revolut_builds_url_and_fetches_only_missing_texts(monkeypatch):
     assert (rows[0][6], rows[1][6]) == (None, "Строим банк")
     assert len(asked) == 1 and "credit-manager" not in asked[0]
     assert jobs.from_url("https://www.revolut.com/en-PT/careers/") == ("revolut", "www.revolut.com")
+
+
+def _flight_page(chunks):
+    """Страница Next.js: поток flight кусками в self.__next_f.push."""
+    import json
+    return "".join(f'<script>self.__next_f.push([1,{json.dumps(c)}])</script>' for c in chunks)
+
+
+MICRO1_LIST = {"total": 3, "data": [
+    {"job_id": "aaaaaaaa-0000-0000-0000-000000000001", "job_name": "Director of Engineering",
+     "apply_url": "https://jobs.micro1.ai/post/aaaaaaaa-0000-0000-0000-000000000001?utm_source=micro1",
+     "location_type": "remote", "date_posted": "2026-11-12 10:00:00",
+     "ideal_yearly_compensation": {"min": 450000, "max": 800000},
+     "ideal_hourly_rate": None, "is_micro1_account": True},
+    {"job_id": "aaaaaaaa-0000-0000-0000-000000000002", "job_name": "Research Headhunter",
+     "apply_url": "https://jobs.micro1.ai/post/aaaaaaaa-0000-0000-0000-000000000002",
+     "location_type": None, "date_posted": "2026-11-02 23:23:35",
+     "ideal_yearly_compensation": None, "ideal_hourly_rate": {"min": 80, "max": 90},
+     "is_micro1_account": True},
+    {"job_id": "aaaaaaaa-0000-0000-0000-000000000003", "job_name": "Client Role",
+     "apply_url": "https://jobs.micro1.ai/post/aaaaaaaa-0000-0000-0000-000000000003",
+     "is_micro1_account": False},
+]}
+
+
+def test_micro1_reads_portal_api_and_job_text(monkeypatch):
+    """micro1 — свой портал: список из POST в их API, текст во flight-потоке
+    страницы вакансии. Чужие (клиентские) вакансии и известный текст не берём."""
+    import jobs
+    posts, gets = [], []
+
+    def fake_post(url, payload, ua=None):
+        posts.append((url, payload))
+        return MICRO1_LIST
+
+    body = "<p>Own the platform. Go, Kubernetes.</p>"
+    page = _flight_page(['0:{"job_description":"$1f","job_tags":["Core team"]}\n',
+                         f"1f:T{len(body.encode()):x},{body}"])
+
+    def fake_get(url, want_json=True, **k):
+        gets.append(url)
+        return page
+
+    monkeypatch.setattr(jobs, "post_json", fake_post)
+    monkeypatch.setattr(jobs, "get", fake_get)
+    known = {"https://jobs.micro1.ai/post/aaaaaaaa-0000-0000-0000-000000000002"}
+    got = jobs.micro1("micro1", have_text=known)
+    assert len(posts) == 1 and posts[0][1]["action"] == "get_all_jobs"
+    assert [g[1] for g in got] == ["Director of Engineering", "Research Headhunter"]
+    first, second = got
+    assert first[0] == "https://jobs.micro1.ai/post/aaaaaaaa-0000-0000-0000-000000000001"
+    assert first[2] == "Remote" and first[3] == "2026-11-12"
+    assert first[4] == "450000–800000 USD год" and second[4] == "80–90 USD час"
+    assert "Go, Kubernetes" in first[6] and second[6] is None
+    assert gets == [first[0]]
+
+
+def test_micro1_from_url():
+    import jobs
+    assert jobs.from_url("https://www.micro1.ai/careers") == ("micro1", "micro1")
+    assert jobs.from_url("https://jobs.micro1.ai/post/x") == ("micro1", "micro1")
+    assert jobs.from_url("https://micro1.ai.example.com/") is None
