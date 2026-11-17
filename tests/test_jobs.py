@@ -1188,3 +1188,24 @@ def test_revolut_builds_url_and_fetches_only_missing_texts(monkeypatch):
     assert (rows[0][6], rows[1][6]) == (None, "Строим банк")
     assert len(asked) == 1 and "credit-manager" not in asked[0]
     assert jobs.from_url("https://www.revolut.com/en-PT/careers/") == ("revolut", "www.revolut.com")
+
+
+def test_get_survives_incomplete_read(monkeypatch):
+    """Обрыв ответа на середине — http.client.IncompleteRead, он не OSError.
+    Раньше он пролетал мимо get() и ронял весь обход, а не одну компанию."""
+    import http.client
+
+    class Cut:
+        status = 200
+
+        def read(self):
+            raise http.client.IncompleteRead(b"{\"jobs\": [", 70842)
+
+    calls = []
+    monkeypatch.setattr(jobs.urllib.request, "urlopen",
+                        lambda *a, **k: calls.append(1) or Cut())
+    monkeypatch.setattr(jobs, "space_out", lambda u: None)
+    monkeypatch.setattr(jobs.time, "sleep", lambda s: None)
+    assert jobs.get("https://example.com/api") is None
+    assert len(calls) == 2                       # один повтор, как при сетевой ошибке
+    assert jobs.post_json("https://example.com/graphql", {}) is None

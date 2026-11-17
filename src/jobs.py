@@ -4,7 +4,7 @@
 Компании добавляются через бота и живут в таблице companies. У кого нет
 читаемой доски — следим за изменением карьерной страницы по хешу.
 """
-import ast, hashlib, json, os, re, ssl, sys, threading, time, urllib.error, urllib.parse, urllib.request
+import ast, hashlib, http.client, json, os, re, ssl, sys, threading, time, urllib.error, urllib.parse, urllib.request
 import html as html_mod
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
@@ -69,7 +69,9 @@ def get(url, want_json=True, with_code=False, data=None):
                 time.sleep(3)
                 continue
             break
-        except (urllib.error.URLError, OSError):
+        except (urllib.error.URLError, OSError, http.client.HTTPException):
+            # HTTPException — не OSError: обрыв ответа на середине (IncompleteRead)
+            # пролетал мимо и ронял весь обход, а не одну компанию.
             if attempt == 0:
                 time.sleep(2)
                 continue
@@ -98,7 +100,7 @@ def post_json(url, payload, ua=None):
     try:
         space_out(url)
         return json.loads(urllib.request.urlopen(req, timeout=TIMEOUT).read())
-    except (urllib.error.URLError, OSError, ValueError):
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
         return None
 
 
