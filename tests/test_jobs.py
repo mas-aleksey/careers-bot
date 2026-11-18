@@ -1188,3 +1188,23 @@ def test_revolut_builds_url_and_fetches_only_missing_texts(monkeypatch):
     assert (rows[0][6], rows[1][6]) == (None, "Строим банк")
     assert len(asked) == 1 and "credit-manager" not in asked[0]
     assert jobs.from_url("https://www.revolut.com/en-PT/careers/") == ("revolut", "www.revolut.com")
+
+
+def test_successfactors_page_lost_midway_is_failure(monkeypatch):
+    """Страница посреди выдачи не пришла. Обрезанный список закрыл бы хвост
+    вакансий до следующего обхода, поэтому весь ответ — None, как сбой."""
+    import jobs
+    pages = iter([SF_PAGE_HTML.replace("of 12", "of 40"), SF_PAGE_HTML, None])
+    monkeypatch.setattr(jobs, "get", lambda url, **k: next(pages, None))
+    assert jobs.successfactors("careers.vestas.com", have_text=ALL_SF_URLS) is None
+
+
+def test_phenom_page_lost_midway_is_failure(monkeypatch):
+    """Вторая страница Phenom не ответила при totalHits 200: не отдаём 50
+    из 200, иначе остальные 150 закрылись бы."""
+    import jobs
+    first = {"refineSearch": {"totalHits": 200, "data": {"jobs": [
+        {"applyUrl": f"https://ats/{i}", "title": "Data Engineer"} for i in range(50)]}}}
+    pages = iter([first, None])
+    monkeypatch.setattr(jobs, "get", lambda *a, **k: next(pages, None))
+    assert jobs.phenom("careers.genmab.com") is None
