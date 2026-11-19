@@ -1069,6 +1069,28 @@ def test_aviasales_takes_the_title_not_the_team(monkeypatch):
     assert jobs.ADAPTERS["aviasales"] is jobs.aviasales
 
 
+def test_long_empty_board_closes_leftover_jobs(monkeypatch):
+    """Пустой список не закрывал ничего, и последняя вакансия AppFollow висела
+    открытой три недели после снятия. Пустая дольше двух суток — закрываем;
+    свежая пустота — по-прежнему сбой API, вакансию не трогаем."""
+    import storage
+    conn = storage.connect()
+    for name, ok in (("Давно пусто", "2026-10-30T08:00:00+00:00"),
+                     ("Только что", storage.now())):
+        conn.execute("INSERT OR REPLACE INTO companies(name,page_url,ats,slug,last_ok) "
+                     "VALUES(?,?,'lever','x',?)", (name, f"https://{len(name)}.test", ok))
+        conn.execute("INSERT OR REPLACE INTO jobs(url,company,title,source,first_seen) "
+                     "VALUES(?,?,'Backend','lever','2026-10-01')", (f"https://j.test/{name}", name))
+    conn.commit()
+    monkeypatch.setattr(jobs, "db", lambda: conn)
+    monkeypatch.setitem(jobs.ADAPTERS, "lever", lambda s: [])
+    jobs.run(only="Давно пусто")
+    jobs.run(only="Только что")
+    shut = dict(conn.execute("SELECT company, closed_at FROM jobs WHERE url LIKE 'https://j.test/%'"))
+    assert shut["Давно пусто"] is not None
+    assert shut["Только что"] is None
+
+
 def test_closed_job_reopens_when_it_is_back_on_the_board(monkeypatch):
     """Разовый сбой выдачи закрывал вакансию навсегда: INSERT OR IGNORE молча
     пропускает известный url, и closed_at уже никто не снимал."""
