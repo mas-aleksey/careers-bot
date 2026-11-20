@@ -216,6 +216,7 @@ def posted(value):
 
 PHENOM_SIZE = 50      # больше виджет не отдаёт: при 100 возвращает те же 50
 PHENOM_PAGES = 20     # потолок на случай, если totalHits врёт: 1000 вакансий
+PHENOM_PASSES = 4     # повторных проходов на страницы внахлёст: Genmab добирает за 1–2
 
 # --- адаптеры ---------------------------------------------------------------
 # Ashby, Workable и SmartRecruiters отдают 200 на любой slug — проверяем тело.
@@ -1119,7 +1120,25 @@ def phenom(s):
     Текста вакансии виджет не отдаёт, только тизер в пару строк. Склеиваем его
     с распознанными навыками: это заметно беднее полного описания, но оценка по
     одному заголовку слепа к стеку."""
-    out, seen = [], 0
+    # Порядок выдачи у виджета плавает между запросами, и страницы идут
+    # внахлёст: у Genmab из 139 строк прохода уникальных 124, а пятнадцать
+    # пропавших сборщик закрывал до следующего обхода. Добираем повторными
+    # проходами, пока уникальных адресов не станет totalHits.
+    out, have, total = [], set(), 0
+    for _ in range(PHENOM_PASSES):
+        rows, total = phenom_pass(s)
+        for r in rows:
+            if r[0] and r[0] not in have:
+                have.add(r[0])
+                out.append(r)
+        if not rows or len(have) >= total:
+            break
+    return out or None
+
+
+def phenom_pass(s):
+    """Один проход по страницам виджета: строки и totalHits."""
+    out, seen, total = [], 0, 0
     for _ in range(PHENOM_PAGES):
         d = get(f"https://{s}/widgets", data=json.dumps({
             "lang": "en_global", "deviceType": "desktop", "country": "global",
@@ -1128,6 +1147,7 @@ def phenom(s):
             "siteType": "external", "keywords": "", "sortBy": "",
             "all_fields": ["country", "state", "city", "category"]}).encode())
         rs = (d or {}).get("refineSearch") or {}
+        total = rs.get("totalHits") or total
         jobs = (rs.get("data") or {}).get("jobs") or []
         if not jobs:
             break
@@ -1139,9 +1159,9 @@ def phenom(s):
                         posted(j.get("postedDate") or j.get("dateCreated")),
                         None, "", text or None))
         seen += len(jobs)
-        if seen >= (rs.get("totalHits") or 0):
+        if seen >= total:
             break
-    return out or None
+    return out, total
 
 
 ADAPTERS = {"ashby": ashby, "phenom": phenom, "successfactors": successfactors,

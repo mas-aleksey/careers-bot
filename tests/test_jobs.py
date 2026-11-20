@@ -575,6 +575,30 @@ def test_phenom_posts_widget_and_pages_until_total(monkeypatch):
     assert jobs.phenom("careers.nobody.com") is None
 
 
+def test_phenom_repeats_pass_when_pages_overlap(monkeypatch):
+    """Порядок выдачи Phenom плавает, страницы идут внахлёст: проход видит
+    дубль и теряет вакансию. Потерянную сборщик закрыл бы, поэтому добираем
+    вторым проходом, пока уникальных не станет totalHits, и дубли выкидываем."""
+    import json as js, jobs
+    calls = []
+
+    def fake_get(url, want_json=True, with_code=False, data=None):
+        body = js.loads(data)
+        calls.append(body["from"])
+        first_pass = len(calls) <= 2
+        if body["from"] == 0:
+            ids = range(50)
+        else:      # первый проход: вместо 50-й снова 49-я
+            ids = [49] if first_pass else [50]
+        return {"refineSearch": {"totalHits": 51, "data": {"jobs": [
+            {"applyUrl": f"https://ats/{i}", "title": "Data Engineer"} for i in ids]}}}
+
+    monkeypatch.setattr(jobs, "get", fake_get)
+    got = jobs.phenom("careers.genmab.com")
+    assert calls == [0, 50, 0, 50]
+    assert sorted(r[0] for r in got) == sorted(f"https://ats/{i}" for i in range(51))
+
+
 def test_teamtailor_slug_with_dot_is_own_domain(monkeypatch):
     """Свой домен вместо поддомена Teamtailor: у Trackunit фид на
     careers.trackunit.com, trackunit.teamtailor.com отдаёт 404."""
