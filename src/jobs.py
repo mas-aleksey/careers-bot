@@ -131,6 +131,8 @@ ATS_IN_URL = [
     ("pinpoint", r"([a-z0-9-]+)\.pinpointhq\.com"),
     # своя витрина Comeet: comeet.com/jobs/<компания>/<id>, слаг — адрес без схемы
     ("comeet", r"((?:www\.)?comeet\.com/jobs/[a-z0-9-]+/[0-9A-Z.]+)"),
+    # свой портал micro1: список отдаёт их API, слаг — просто имя
+    ("micro1", r"(?:www\.|jobs\.)?(micro1)\.ai(?:/careers|/post/|/?$)"),
 ]
 
 
@@ -961,6 +963,69 @@ def comeet(s, have_text=()):
     return out or None
 
 
+MICRO1_API = "https://prod-api.micro1.ai/api/v1/job/portal"
+MICRO1_PAGE = 100     # столько же просит их собственная страница
+MICRO1_TEXT_MAX = 40  # описаний за обход: у micro1 сейчас 36 вакансий
+MICRO1_DESC = re.compile(r'"job_description":"\$([0-9a-f]+)"')
+
+
+def micro1_text(url):
+    """Страница вакансии на Next.js: текст лежит во flight-потоке отдельным
+    блоком, на который ссылается поле job_description."""
+    page = get(url, want_json=False)
+    if not isinstance(page, str):
+        return None
+    stream = "".join(
+        chunk for m in re.finditer(r"self\.__next_f\.push\(\[1,(\".*?\")\]\)", page, re.S)
+        for chunk in [json_loads(m.group(1))] if isinstance(chunk, str))
+    ref = MICRO1_DESC.search(stream)
+    if not ref:
+        return None
+    raw = stream.encode()
+    for m in FLIGHT_BLOCK.finditer(raw):
+        if m.group(1).decode() == ref.group(1):
+            return plain_text(raw[m.end():m.end() + int(m.group(2), 16)].decode("utf8", "replace")) or None
+    return None
+
+
+def micro1(s, have_text=()):
+    """micro1: свой портал без ATS. Список — POST в их API, тот же запрос, что
+    шлёт страница micro1.ai/careers; текста в нём нет, только навыки и вилка.
+
+    В выдаче бывают вакансии клиентов micro1 — берём только их собственные
+    (is_micro1_account), иначе это ровно тот кадровый поток, что реестру не нужен."""
+    out, left = [], MICRO1_TEXT_MAX
+    for page in range(1, 11):
+        d = post_json(f"{MICRO1_API}?page={page}&limit={MICRO1_PAGE}&keyword=",
+                      {"action": "get_all_jobs",
+                       "filters": {"type": ["EXTENDED", "CORE_TEAM"]}}, ua=BROWSER_UA)
+        rows = d.get("data") if isinstance(d, dict) else None
+        if not isinstance(rows, list):
+            return out or None
+        for j in rows:
+            if not j.get("is_micro1_account") or not j.get("job_name"):
+                continue
+            url = (j.get("apply_url") or "").split("?")[0] or \
+                f"https://jobs.micro1.ai/post/{j.get('job_id')}"
+            place = (j.get("location_type") or "").capitalize()
+            if j.get("location_name"):
+                place = f"{j['location_name']}, {place}".strip(", ")
+            pay = None
+            year, hour = j.get("ideal_yearly_compensation"), j.get("ideal_hourly_rate")
+            if isinstance(year, dict) and year.get("min"):
+                pay = f"{year['min']:.0f}–{year.get('max') or year['min']:.0f} USD год"
+            elif isinstance(hour, dict) and hour.get("min"):
+                pay = f"{hour['min']:.0f}–{hour.get('max') or hour['min']:.0f} USD час"
+            text = None
+            if url not in have_text and left:
+                text = micro1_text(url)
+                left -= 1
+            out.append((url, j["job_name"], place, posted(j.get("date_posted")), pay, "", text))
+        if len(rows) < MICRO1_PAGE or page * MICRO1_PAGE >= (d.get("total") or 0):
+            break
+    return out or None
+
+
 COMEET_DATA = re.compile(r'COMPANY_POSITIONS_DATA\s*=\s*(\[.*?\]);\s*\n', re.S)
 
 
@@ -1192,7 +1257,8 @@ ADAPTERS = {"ashby": ashby, "phenom": phenom, "successfactors": successfactors,
             "atlassian": atlassian,
             "epam": epam,
             "peopleforce": peopleforce,
-            "aviasales": aviasales}
+            "aviasales": aviasales,
+            "micro1": micro1}
 
 
 def discover(name, url):
@@ -1568,6 +1634,8 @@ def collect(name, url, cache, known=(), described=()):
         return name, ats, slug, oracle(slug, described), None
     if ats == "comeet":
         return name, ats, slug, comeet(slug, described), None
+    if ats == "micro1":
+        return name, ats, slug, micro1(slug, described), None
     if ats == "revolut":
         return name, ats, slug, revolut(slug, described), None
     if ats:
