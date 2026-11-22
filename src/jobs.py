@@ -1590,6 +1590,12 @@ def collect(name, url, cache, known=(), described=()):
 # всё, что проверил предыдущий, и пройдёт вхолостую.
 FRESH_HOURS = 3
 
+# Доска отдаёт пустой список дольше этого срока — значит, вакансий там правда
+# нет, и оставшиеся открытыми закрываем. Короче нельзя: разовый пустой ответ
+# API случается, а вернувшаяся вакансия хоть и откроется снова, но уже без
+# своей истории в сводке.
+EMPTY_CLOSE_DAYS = 2
+
 
 def run(only=None):
     """only — подстрока имени: гонять весь реестр ради одной компании незачем.
@@ -1623,7 +1629,12 @@ def run(only=None):
 
     new, changed, stats, closed, to_diagnose = [], [], [], [], []
     reopened = 0
+    empty_cutoff = (datetime.now(timezone.utc)
+                    - timedelta(days=EMPTY_CLOSE_DAYS)).isoformat(timespec="seconds")
     for (name, url), (_, ats, slug, jobs, phash) in zip(companies, results):
+        # last_ok — последний непустой ответ доски; читать до UPDATE ниже
+        row = conn.execute("SELECT last_ok FROM companies WHERE name=?", (name,)).fetchone()
+        last_ok = row[0] if row else None
         # added_by/added_at только при вставке: обход не должен переписывать,
         # кто завёл компанию. DO UPDATE их намеренно не трогает.
         conn.execute("INSERT INTO companies(name,page_url,ats,slug,checked_at,added_by,added_at) "
@@ -1695,14 +1706,22 @@ def run(only=None):
             if cur.rowcount:
                 fresh += 1
                 new.append((name, title, f"{loc} · опубликована {pub}" if pub else loc, j_url))
-        # Вакансия пропала с доски — помечаем закрытой. Только при непустом
-        # ответе: пустой список чаще означает сбой API, а не «всех наняли».
+        # Вакансия пропала с доски — помечаем закрытой. При непустом ответе
+        # сразу: пустой список чаще означает сбой API, а не «всех наняли».
+        # Но доска, пустая дольше EMPTY_CLOSE_DAYS, действительно пуста: без
+        # этого последняя вакансия висела открытой неделями после снятия.
         if jobs:
             live = {j[0] for j in jobs if j and j[0]}
             marks = conn.execute(
                 "UPDATE jobs SET closed_at=? WHERE company=? AND closed_at IS NULL "
                 f"AND url NOT IN ({','.join('?' * len(live))})",
                 [now, name, *live]).rowcount
+            if marks:
+                closed.append((name, marks))
+        elif jobs == [] and (last_ok is None or last_ok < empty_cutoff):
+            marks = conn.execute(
+                "UPDATE jobs SET closed_at=? WHERE company=? AND closed_at IS NULL",
+                (now, name)).rowcount
             if marks:
                 closed.append((name, marks))
         stats.append((name, ats, fresh))
