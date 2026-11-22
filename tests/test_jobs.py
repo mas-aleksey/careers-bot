@@ -511,6 +511,30 @@ def test_successfactors_parses_rows_and_stops_on_total(monkeypatch):
     assert "startrow=10" in seen[1] and "locale=en_GB" in seen[0]
 
 
+def test_successfactors_broken_paging_is_not_a_full_list(monkeypatch):
+    """Страница посреди выдачи не ответила. Неполный список сборщик принял бы
+    за честный и закрыл бы непролистанные вакансии — возвращаем None."""
+    import jobs
+    pages = SF_PAGE_HTML.replace("of 12", "of 40")
+    seen = []
+
+    def fake_get(url, want_json=True, **k):
+        seen.append(url)
+        return pages if len(seen) <= 3 else None
+
+    monkeypatch.setattr(jobs, "get", fake_get)
+    assert jobs.successfactors("careers.vestas.com", have_text=ALL_SF_URLS) is None
+    # Страница пришла, но без строк, — тоже обрыв, а не конец выдачи
+    seen.clear()
+
+    def no_rows(url, want_json=True, **k):
+        seen.append(url)
+        return pages if len(seen) <= 3 else "<p>Results 1 to 10 of 40</p>"
+
+    monkeypatch.setattr(jobs, "get", no_rows)
+    assert jobs.successfactors("careers.vestas.com", have_text=ALL_SF_URLS) is None
+
+
 class ALL_SF_URLS:
     """Множество, в котором «лежит» любой адрес: имитирует базу, где описание
     уже есть у всех вакансий."""
@@ -573,6 +597,21 @@ def test_phenom_posts_widget_and_pages_until_total(monkeypatch):
     # Пустая выдача — не доска Phenom, а чужой сайт: None, а не []
     monkeypatch.setattr(jobs, "get", lambda *a, **k: {"refineSearch": {}})
     assert jobs.phenom("careers.nobody.com") is None
+
+
+def test_phenom_broken_paging_is_not_a_full_list(monkeypatch):
+    """Вторая страница виджета не ответила при totalHits 140: отдать первые 50
+    значило бы закрыть 90 живых вакансий. Возвращаем None."""
+    import json as js, jobs
+
+    def fake_get(url, want_json=True, with_code=False, data=None):
+        if js.loads(data)["from"]:
+            return None
+        return {"refineSearch": {"totalHits": 140, "data": {"jobs": [
+            {"applyUrl": f"https://ats/{i}", "title": "Data Engineer"} for i in range(50)]}}}
+
+    monkeypatch.setattr(jobs, "get", fake_get)
+    assert jobs.phenom("careers.genmab.com") is None
 
 
 def test_teamtailor_slug_with_dot_is_own_domain(monkeypatch):

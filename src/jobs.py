@@ -1108,6 +1108,12 @@ def successfactors(s, have_text=()):
                         None, "", None))
         if total and len(out) >= total:
             break
+    if total and len(out) < total - SF_PAGE:
+        # Выдача оборвалась на середине: страница не ответила или пришла без
+        # строк. Неполный список сборщик принял бы за честный и закрыл бы всё,
+        # что не успели пролистать, — у Vestas так закрылось и вернулось 534
+        # вакансии за четыре часа. Лучше пропустить обход, чем закрыть живые.
+        return None
     return sf_texts(out, have_text) or None
 
 
@@ -1121,7 +1127,7 @@ def phenom(s):
     Текста вакансии виджет не отдаёт, только тизер в пару строк. Склеиваем его
     с распознанными навыками: это заметно беднее полного описания, но оценка по
     одному заголовку слепа к стеку."""
-    out, seen = [], 0
+    out, seen, total = [], 0, 0
     for _ in range(PHENOM_PAGES):
         d = get(f"https://{s}/widgets", data=json.dumps({
             "lang": "en_global", "deviceType": "desktop", "country": "global",
@@ -1130,6 +1136,7 @@ def phenom(s):
             "siteType": "external", "keywords": "", "sortBy": "",
             "all_fields": ["country", "state", "city", "category"]}).encode())
         rs = (d or {}).get("refineSearch") or {}
+        total = rs.get("totalHits") or total
         jobs = (rs.get("data") or {}).get("jobs") or []
         if not jobs:
             break
@@ -1141,8 +1148,12 @@ def phenom(s):
                         posted(j.get("postedDate") or j.get("dateCreated")),
                         None, "", text or None))
         seen += len(jobs)
-        if seen >= (rs.get("totalHits") or 0):
+        if seen >= total:
             break
+    if seen < total - PHENOM_SIZE:
+        # Оборвалось посреди листания — как у SuccessFactors: неполный список
+        # закрыл бы непролистанные вакансии. Пропускаем обход целиком.
+        return None
     return out or None
 
 
