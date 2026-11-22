@@ -218,6 +218,7 @@ def posted(value):
 
 PHENOM_SIZE = 50      # больше виджет не отдаёт: при 100 возвращает те же 50
 PHENOM_PAGES = 20     # потолок на случай, если totalHits врёт: 1000 вакансий
+PHENOM_PASSES = 4     # повторных проходов на страницы внахлёст: Genmab добирает за 1–2
 
 # --- адаптеры ---------------------------------------------------------------
 # Ashby, Workable и SmartRecruiters отдают 200 на любой slug — проверяем тело.
@@ -1127,6 +1128,27 @@ def phenom(s):
     Текста вакансии виджет не отдаёт, только тизер в пару строк. Склеиваем его
     с распознанными навыками: это заметно беднее полного описания, но оценка по
     одному заголовку слепа к стеку."""
+    # Порядок выдачи у виджета плавает между запросами, и страницы идут
+    # внахлёст: у Genmab из 139 строк прохода уникальных 124, а пятнадцать
+    # пропавших сборщик закрывал до следующего обхода. Добираем повторными
+    # проходами, пока уникальных адресов не станет totalHits.
+    out, have, total = [], set(), 0
+    for _ in range(PHENOM_PASSES):
+        rows, total = phenom_pass(s)
+        if rows is None:
+            return None
+        for r in rows:
+            if r[0] and r[0] not in have:
+                have.add(r[0])
+                out.append(r)
+        if not rows or len(have) >= total:
+            break
+    return out or None
+
+
+def phenom_pass(s):
+    """Один проход по страницам виджета: строки и totalHits. Строк None —
+    листание оборвалось, и обход компании надо пропустить целиком."""
     out, seen, total = [], 0, 0
     for _ in range(PHENOM_PAGES):
         d = get(f"https://{s}/widgets", data=json.dumps({
@@ -1153,8 +1175,8 @@ def phenom(s):
     if seen < total - PHENOM_SIZE:
         # Оборвалось посреди листания — как у SuccessFactors: неполный список
         # закрыл бы непролистанные вакансии. Пропускаем обход целиком.
-        return None
-    return out or None
+        return None, total
+    return out, total
 
 
 ADAPTERS = {"ashby": ashby, "phenom": phenom, "successfactors": successfactors,
