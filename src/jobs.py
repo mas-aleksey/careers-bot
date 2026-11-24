@@ -1159,6 +1159,10 @@ def successfactors(s, have_text=()):
             m = SF_TOTAL.search(html_txt)
             total = int(m.group(1)) if m else 0
         rows = SF_ROW.findall(html_txt)
+        if not rows and page == 0 and not total:
+            # Ни таблицы, ни счётчика: сайт переведён на новую выдачу, которая
+            # рисует список скриптом из JSON. У Vestas так с 23.11.2026.
+            return sf_unified(s, have_text)
         if not rows:
             break
         for row in rows:
@@ -1179,6 +1183,43 @@ def successfactors(s, have_text=()):
         # строк. Неполный список сборщик принял бы за честный и закрыл бы всё,
         # что не успели пролистать, — у Vestas так закрылось и вернулось 534
         # вакансии за четыре часа. Лучше пропустить обход, чем закрыть живые.
+        return None
+    return sf_texts(out, have_text) or None
+
+
+SF_API_PAGES = 150    # потолок новой выдачи: по 10 строк, у Vestas 866
+
+
+def sf_unified(s, have_text=()):
+    """Новая выдача SuccessFactors: POST /services/recruiting/v1/jobs, JSON по
+    десять вакансий, счётчик totalJobs. Даты публикации в ответе нет.
+
+    Адрес собираем как в старой таблице — /job/<urlTitle>/<id>/: по нему
+    открывается карточка с текстом, тот же sf_texts его и дочитывает."""
+    out, have, total = [], set(), 0
+    for page in range(SF_API_PAGES):
+        d = get(f"https://{s}/services/recruiting/v1/jobs", data=json.dumps({
+            "keywords": "", "locale": "en_GB", "location": "",
+            "pageNumber": page, "sortBy": "recent"}).encode())
+        if not isinstance(d, dict):
+            break
+        total = d.get("totalJobs") or total
+        rows = [x.get("response") or {} for x in d.get("jobSearchResult") or []]
+        if not rows:
+            break
+        for j in rows:
+            if not j.get("id") or not j.get("urlTitle"):
+                continue
+            url = f"https://{s}/job/{j['urlTitle']}/{j['id']}/"
+            if url in have:
+                continue
+            have.add(url)
+            out.append((url, plain_text(j.get("unifiedStandardTitle") or "") or "",
+                        "; ".join(j.get("jobLocationShort") or []), None, None, "", None))
+        if total and len(have) >= total:
+            break
+    if not total or len(out) < total - SF_PAGE:
+        # Как и в таблице: оборванный список закрыл бы непролистанные вакансии
         return None
     return sf_texts(out, have_text) or None
 

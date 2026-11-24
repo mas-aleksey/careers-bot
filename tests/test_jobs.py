@@ -535,6 +535,45 @@ def test_successfactors_broken_paging_is_not_a_full_list(monkeypatch):
     assert jobs.successfactors("careers.vestas.com", have_text=ALL_SF_URLS) is None
 
 
+def test_successfactors_unified_search_json(monkeypatch):
+    """Сайт перевели на новую выдачу: в HTML ни таблицы, ни счётчика, список
+    приходит POST-ом из /services/recruiting/v1/jobs. Листаем до totalJobs,
+    адрес — /job/<urlTitle>/<id>/, как у карточки со старой таблицы."""
+    import json as js, jobs
+    seen = []
+
+    def card(i):
+        return {"response": {"id": str(i), "urlTitle": f"Aarhus-N-Engineer-{i}",
+                             "unifiedStandardTitle": f"Engineer {i}",
+                             "jobLocationShort": ["Aarhus N, Regi, DK"]}}
+
+    def fake_get(url, want_json=True, data=None, **k):
+        if "/search/" in url:
+            return "<html><div id='job-results-list'></div></html>"
+        page = js.loads(data)["pageNumber"]
+        seen.append(page)
+        rows = [card(page * 2), card(page * 2 + 1)] if page < 3 else []
+        return {"totalJobs": 5, "jobSearchResult": rows[:5 - page * 2]}
+
+    monkeypatch.setattr(jobs, "get", fake_get)
+    got = jobs.successfactors("careers.vestas.com", have_text=ALL_SF_URLS)
+    assert got[0][:4] == ("https://careers.vestas.com/job/Aarhus-N-Engineer-0/0/",
+                          "Engineer 0", "Aarhus N, Regi, DK", None)
+    assert len(got) == 5 and seen == [0, 1, 2]
+
+    # Ответ оборвался на второй странице — не полный список, обход пропускаем
+    seen.clear()
+
+    def broken(url, want_json=True, data=None, **k):
+        if "/search/" in url:
+            return "<html></html>"
+        page = js.loads(data)["pageNumber"]
+        return {"totalJobs": 40, "jobSearchResult": [card(1)]} if page == 0 else None
+
+    monkeypatch.setattr(jobs, "get", broken)
+    assert jobs.successfactors("careers.vestas.com", have_text=ALL_SF_URLS) is None
+
+
 class ALL_SF_URLS:
     """Множество, в котором «лежит» любой адрес: имитирует базу, где описание
     уже есть у всех вакансий."""
