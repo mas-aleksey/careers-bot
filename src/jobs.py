@@ -129,6 +129,7 @@ ATS_IN_URL = [
     ("revolutpeople", r"revolutpeople\.com/([a-z0-9-]+)/"),
     ("revolut", r"(www\.revolut\.com)/(?:[a-z]{2}-[A-Z]{2}/)?careers"),
     ("pinpoint", r"([a-z0-9-]+)\.pinpointhq\.com"),
+    ("breezy", r"([a-z0-9-]+)\.breezy\.hr"),
     # своя витрина Comeet: comeet.com/jobs/<компания>/<id>, слаг — адрес без схемы
     ("comeet", r"((?:www\.)?comeet\.com/jobs/[a-z0-9-]+/[0-9A-Z.]+)"),
     # свой портал micro1: список отдаёт их API, слаг — просто имя
@@ -170,6 +171,9 @@ def board_owner(ats, slug):
         return ((d or {}).get("offers") or [{}])[0].get("company_name")
     if ats == "bamboohr":
         return (bb_info(slug) or {}).get("name")
+    if ats == "breezy":
+        d = get(f"https://{slug}.breezy.hr/json")
+        return ((d or [{}])[0].get("company") or {}).get("name") if isinstance(d, list) else None
     return None
 
 
@@ -471,6 +475,40 @@ def pinpoint(s):
                     j.get("title", ""), place, None, pay,
                     str(j.get("reporting_to") or "")[:80], plain_text(j.get("description"))))
     return out
+
+
+BREEZY_TEXT_MAX = 40   # страниц вакансий за обход: у Super Dispatch их три
+
+
+def breezy(s, described=None):
+    """Breezy HR: открытый JSON <компания>.breezy.hr/json, без ключа и без текста.
+    Текст лежит в schema.org на странице вакансии — дочитываем только тем, у кого
+    его ещё нет. described=None — разведка по имени: страниц не качаем вовсе.
+
+    Место работы — все locations, а не первая: у Super Dispatch одна вакансия
+    открыта сразу в пяти странах, и location называет только Узбекистан."""
+    d = get(f"https://{s}.breezy.hr/json")
+    if not isinstance(d, list):
+        return None
+    out, left = [], BREEZY_TEXT_MAX if described is not None else 0
+    for j in d:
+        if not isinstance(j, dict) or not j.get("url") or not j.get("name"):
+            continue
+        places = j.get("locations") or [j.get("location") or {}]
+        names = list(dict.fromkeys(p.get("name") for p in places if p.get("name")))
+        place = " · ".join(names[:5])
+        if any(p.get("is_remote") for p in places):
+            place = f"{place}, Remote".strip(", ")
+        text = None
+        if left and j["url"] not in described:
+            page = get(j["url"], want_json=False)
+            rows = jsonld_jobs(page) if isinstance(page, str) else []
+            text = rows[0][6] if rows and len(rows[0]) > 6 else None
+            left -= 1
+        out.append((j["url"], j["name"], place, posted(j.get("published_date")),
+                    j.get("salary") or None, "", text))
+    return out
+
 
 def personio(s):
     """XML-фид, а не JSON: `<office>` — единственная локация, которую Personio
@@ -1299,7 +1337,8 @@ ADAPTERS = {"ashby": ashby, "phenom": phenom, "successfactors": successfactors,
             "epam": epam,
             "peopleforce": peopleforce,
             "aviasales": aviasales,
-            "micro1": micro1}
+            "micro1": micro1,
+            "breezy": breezy}
 
 
 def discover(name, url):
@@ -1310,7 +1349,7 @@ def discover(name, url):
     for s in slug_variants(name):
         for ats in ("ashby", "greenhouse", "lever", "smartrecruiters", "workable",
                     "recruitee", "teamtailor", "pinpoint", "personio",
-                    "bamboohr"):
+                    "bamboohr", "breezy"):
             # Пустая доска — не доказательство, что это та самая компания:
             # Workable заводит аккаунты под кучу имён, и Atlassian с Revolut
             # получили чужие. Для discovery годится только доска с вакансиями.
@@ -1628,7 +1667,8 @@ def diagnose(ats, slug, url):
              "recruitee": f"https://{slug}.recruitee.com/api/offers/",
              "teamtailor": f"https://{slug}.teamtailor.com/jobs.json",
              "pinpoint": f"https://{slug}.pinpointhq.com/postings.json",
-             "bamboohr": f"https://{slug}.bamboohr.com/careers/list"}.get(ats, url)
+             "bamboohr": f"https://{slug}.bamboohr.com/careers/list",
+             "breezy": f"https://{slug}.breezy.hr/json"}.get(ats, url)
     if not probe:
         return "нет адреса для проверки"
     try:
@@ -1677,6 +1717,8 @@ def collect(name, url, cache, known=(), described=()):
         return name, ats, slug, comeet(slug, described), None
     if ats == "micro1":
         return name, ats, slug, micro1(slug, described), None
+    if ats == "breezy":
+        return name, ats, slug, breezy(slug, described), None
     if ats == "revolut":
         return name, ats, slug, revolut(slug, described), None
     if ats:

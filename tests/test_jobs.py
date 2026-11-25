@@ -53,7 +53,7 @@ def test_embedded_payload_parsed(monkeypatch):
 
 def test_every_adapter_is_registered():
     for name in ("ashby", "greenhouse", "lever", "smartrecruiters", "workable",
-                 "recruitee", "teamtailor", "pinpoint"):
+                 "recruitee", "teamtailor", "pinpoint", "breezy"):
         assert callable(jobs.ADAPTERS[name])
 
 
@@ -1395,3 +1395,58 @@ def test_micro1_from_url():
     assert jobs.from_url("https://www.micro1.ai/careers") == ("micro1", "micro1")
     assert jobs.from_url("https://jobs.micro1.ai/post/x") == ("micro1", "micro1")
     assert jobs.from_url("https://micro1.ai.example.com/") is None
+
+
+BREEZY_LIST = [
+    {"id": "a1", "name": "Senior Engineering Manager",
+     "url": "https://acme.breezy.hr/p/a1-senior-engineering-manager",
+     "published_date": "2026-11-20T19:55:30.897Z", "salary": "",
+     "location": {"name": "Uzbekistan", "is_remote": True},
+     "locations": [{"name": "Uzbekistan", "is_remote": True},
+                   {"name": "Georgia", "is_remote": True},
+                   {"name": "Armenia", "is_remote": True}],
+     "company": {"name": "Acme Dispatch"}},
+    {"id": "b2", "name": "Support Specialist",
+     "url": "https://acme.breezy.hr/p/b2-support-specialist",
+     "published_date": "2026-11-23T16:45:22.378Z", "salary": "$45,000 – $50,000 / year",
+     "location": {"name": "Kansas City", "is_remote": False},
+     "company": {"name": "Acme Dispatch"}},
+]
+
+
+def test_breezy_reads_json_and_job_text(monkeypatch):
+    """Breezy: список из открытого JSON, место работы — все locations, текст —
+    schema.org со страницы вакансии и только у тех, у кого его ещё нет."""
+    import jobs
+    page = ('<script type="application/ld+json">{"@type": "JobPosting", '
+            '"url": "https://acme.breezy.hr/p/a1-senior-engineering-manager?source=GoogleJobs", '
+            '"title": "Senior Engineering Manager", "datePosted": "2026-11-02", '
+            '"description": "<p>Lead Platform and Integrations. Go, Kubernetes.</p>"}</script>')
+    gets = []
+
+    def fake_get(url, want_json=True, **k):
+        gets.append(url)
+        return BREEZY_LIST if url == "https://acme.breezy.hr/json" else page
+
+    monkeypatch.setattr(jobs, "get", fake_get)
+    got = jobs.breezy("acme", described={BREEZY_LIST[1]["url"]})
+    first, second = got
+    assert first[:5] == (BREEZY_LIST[0]["url"], "Senior Engineering Manager",
+                         "Uzbekistan · Georgia · Armenia, Remote", "2026-11-20", None)
+    assert "Go, Kubernetes" in first[6]
+    assert second[2] == "Kansas City" and second[4] == "$45,000 – $50,000 / year"
+    assert second[6] is None
+    assert gets == ["https://acme.breezy.hr/json", BREEZY_LIST[0]["url"]]
+
+    # разведка по имени страниц не качает
+    gets.clear()
+    assert len(jobs.breezy("acme")) == 2 and gets == ["https://acme.breezy.hr/json"]
+    assert jobs.board_owner("breezy", "acme") == "Acme Dispatch"
+
+
+def test_breezy_missing_board_and_url(monkeypatch):
+    import jobs
+    monkeypatch.setattr(jobs, "get", lambda url, want_json=True, **k: None)
+    assert jobs.breezy("nobody") is None
+    assert jobs.from_url("https://superdispatch.breezy.hr/") == ("breezy", "superdispatch")
+    assert jobs.from_url("https://superdispatch.breezy.hr/p/9394767b433e-x") == ("breezy", "superdispatch")
