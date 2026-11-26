@@ -598,7 +598,8 @@ def gate_reason(profile, title, location, psp=None):
 # нанимать, обязателен ли офис, какие грейды допускает текст. Замер 2026-10-12
 # (docs/scaling.md): извлечение этих полей дешёвой моделью не уступает дорогой.
 
-PASSPORT_BATCH = 10
+# 10 на Haiku через пул шли до 345 с при тайм-ауте 180 — запрос бросали недоделанным.
+PASSPORT_BATCH = 5
 PASSPORT_CHARS = 6000   # страна найма часто в конце: «This role is US-based»
 EU_CODES = {"PT","ES","FR","DE","NL","PL","IT","CZ","SE","DK","NO","FI","CH","AT",
             "BE","IE","GB","UK","GR","RO","BG","EE","LV","LT","HU","HR","SK","SI",
