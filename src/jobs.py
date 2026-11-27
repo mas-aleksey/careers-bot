@@ -1296,7 +1296,8 @@ def sf_unified(s, have_text=()):
         for j in rows:
             if not j.get("id") or not j.get("urlTitle"):
                 continue
-            url = f"https://{s}/job/{j['urlTitle']}/{j['id']}/"
+            # urlTitle приходит с «&amp;»: модель вернула бы адрес с «&» и не нашла вакансию
+            url = f"https://{s}/job/{html_mod.unescape(j['urlTitle'])}/{j['id']}/"
             if url in have:
                 continue
             have.add(url)

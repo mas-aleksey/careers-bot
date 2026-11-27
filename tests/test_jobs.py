@@ -543,7 +543,7 @@ def test_successfactors_unified_search_json(monkeypatch):
     seen = []
 
     def card(i):
-        return {"response": {"id": str(i), "urlTitle": f"Aarhus-N-Engineer-{i}",
+        return {"response": {"id": str(i), "urlTitle": f"Aarhus-N-R&amp;D-Engineer-{i}",
                              "unifiedStandardTitle": f"Engineer {i}",
                              "jobLocationShort": ["Aarhus N, Regi, DK"]}}
 
@@ -557,7 +557,7 @@ def test_successfactors_unified_search_json(monkeypatch):
 
     monkeypatch.setattr(jobs, "get", fake_get)
     got = jobs.successfactors("careers.vestas.com", have_text=ALL_SF_URLS)
-    assert got[0][:4] == ("https://careers.vestas.com/job/Aarhus-N-Engineer-0/0/",
+    assert got[0][:4] == ("https://careers.vestas.com/job/Aarhus-N-R&D-Engineer-0/0/",
                           "Engineer 0", "Aarhus N, Regi, DK", None)
     assert len(got) == 5 and seen == [0, 1, 2]
 
