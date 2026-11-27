@@ -1510,3 +1510,22 @@ def test_embedded_unescapes_href(monkeypatch):
     monkeypatch.setattr(jobs, "get", lambda url, want_json=True, **k: html)
     got = jobs.embedded("https://hh.ru/employer/733")
     assert got and got[0][0] == "https://hh.ru/vacancy/139056402?from=a&hhtmFrom=employer", got
+
+
+def test_slug_jobs_last_resort(monkeypatch):
+    """Huntflow и Webflow дают вакансии слагом без id: /vacancy/qa-lead.
+    Пункт меню под тем же сегментом и одиночная ссылка вакансией не считаются,
+    кнопка «Apply» берёт название из заголовка карточки (CVAT)."""
+    import jobs
+    page = ('<a href="/careers/join-us">Join us</a>'
+            '<h2>QA Lead</h2><p>Remote</p><a href="/vacancy/qa-lead">Apply</a>'
+            '<a href="/vacancy/senior-product-analyst-3"><span>Senior Product Analyst</span>'
+            '<span>Remote</span></a>')
+    monkeypatch.setattr(jobs, "get", lambda url, want_json=True, **k: page)
+    got = jobs.embedded("https://x.huntflow.io/")
+    assert [(r[0], r[1]) for r in got] == [
+        ("https://x.huntflow.io/vacancy/qa-lead", "QA Lead"),
+        ("https://x.huntflow.io/vacancy/senior-product-analyst-3", "Senior Product Analyst")], got
+    one = '<a href="/vacancy/qa-lead">QA Lead</a><a href="/careers/join-us">Join us</a>'
+    monkeypatch.setattr(jobs, "get", lambda url, want_json=True, **k: one)
+    assert not jobs.embedded("https://x.huntflow.io/")

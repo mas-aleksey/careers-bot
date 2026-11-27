@@ -1621,7 +1621,7 @@ def job_id_like(href):
     return "-" not in seg or bool(re.search(r"-\d{4,}$", seg))
 
 
-def linked_jobs(html, url):
+def linked_jobs(html, url, is_job=job_id_like):
     """Ступень 3, общий случай: сайт сам перечисляет вакансии ссылками.
     Так устроена Xata — доска у неё на Teamtailor, но публичного фида нет,
     зато собственная страница читается без всякого API."""
@@ -1635,14 +1635,48 @@ def linked_jobs(html, url):
         if not parts:
             continue
         href = m.group("href")
-        if not job_id_like(href):
+        if not is_job(href):
             continue
+        if parts[0].lower() in CTA:      # «Apply» у CVAT, «Show more» у Mr Bit
+            head = re.findall(r"<h[1-4][^>]*>([^<]{3,120})</h[1-4]>", html[max(0, m.start() - 3000):m.start()])
+            if head:                     # нет заголовка — как было, «Learn more» у Boosty Labs
+                parts = [head[-1].strip()]
         full = href if href.startswith("http") else root.group(0) + href
         if full in seen:                 # одна вакансия часто и в списке, и в JSON страницы
             continue
         seen.add(full)
         out.append((full, parts[0], parts[-1] if len(parts) > 1 else "", None))
     return out
+
+
+# Вакансия слагом без id: /vacancy/qa-lead у Huntflow, /job/devops-engineer у
+# Webflow, /jobs/legal_counsel. Слаг стоит прямо под «карьерным» сегментом,
+# но там же живут и разделы сайта — их отсекает NOT_JOBS.
+SLUG_JOB = re.compile(r"/(?:careers?|jobs?|vacanc\w*|positions?)/[A-Za-z0-9_-]{2,80}/?$")
+NOT_JOBS = {"about", "all", "apply", "benefits", "culture", "faq", "how-we-work",
+            "internship", "internships", "join-us", "life", "open-positions",
+            "privacy-notice", "search", "students", "talent-development", "team",
+            "vacancies", "values"}
+CTA = {"apply", "apply now", "show more", "read more", "learn more", "details",
+       "подробнее", "откликнуться"}
+
+
+def slug_job(href):
+    path = href.split("?")[0].split("#")[0]
+    return (bool(SLUG_JOB.search(path))
+            and path.rstrip("/").rsplit("/", 1)[-1].lower() not in NOT_JOBS)
+
+
+def slug_jobs(html, url):
+    """Последняя ступень разбора: слаги берутся, только если ничто другое на
+    странице вакансий не нашло. Иначе у Kake, которую читает flight_jobs,
+    сменились бы адреса всех 63 вакансий.
+
+    ponytail: одиночная ссылка-слаг чаще пункт меню, чем вакансия, поэтому
+    нужно хотя бы две. Компанию с единственной вакансией так не видно — её
+    ловит слежение за страницей."""
+    rows = linked_jobs(html, url, slug_job)
+    return rows if len(rows) >= 2 else []
 
 
 # Dover отдаёт пустую оболочку SPA, а карточку — своим API, без ключа.
@@ -1702,7 +1736,8 @@ def embedded(url, with_text=False):
     out = [(f"{base}/{jid}", title.strip(), "" if place.startswith("$") else place.strip(), None)
            for jid, title, place in JOB_IN_PAYLOAD.findall(html)]
     rows = (out or jsonld_jobs(html) or next_data(html) or linked_jobs(html, url)
-            or notion_jobs(html) or apply_links(html) or flight_jobs(html, url))
+            or notion_jobs(html) or apply_links(html) or flight_jobs(html, url)
+            or slug_jobs(html, url))
     # Адрес из href приходит как в HTML: «&amp;» вместо «&». Такая ссылка ведёт
     # не туда, а модель возвращает её уже раскодированной — паспорт и оценка
     # не находили свою вакансию и запрашивались заново каждый проход.
