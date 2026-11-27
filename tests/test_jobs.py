@@ -1529,3 +1529,34 @@ def test_slug_jobs_last_resort(monkeypatch):
     one = '<a href="/vacancy/qa-lead">QA Lead</a><a href="/careers/join-us">Join us</a>'
     monkeypatch.setattr(jobs, "get", lambda url, want_json=True, **k: one)
     assert not jobs.embedded("https://x.huntflow.io/")
+
+
+def test_long_retry_after_bans_host(monkeypatch):
+    """Workable 2026-11-27: 429 с Retry-After 63627. Бот повторял через 3 с и
+    стучался каждый обход. Теперь хост молчит до срока, срок переживает процесс."""
+    import io, json, urllib.error, jobs
+    calls = []
+
+    def boom(req, timeout=None):
+        calls.append(req.full_url)
+        raise urllib.error.HTTPError(req.full_url, 429, "x", {"Retry-After": "63627"}, io.BytesIO())
+    monkeypatch.setattr(jobs.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(jobs, "_bans", {})
+    url = "https://apply.workable.com/api/v1/widget/accounts/joom?details=true"
+    assert jobs.get(url, with_code=True) == (None, 429) and len(calls) == 1
+    assert jobs.workable("zyte") is None and len(calls) == 1
+    assert "apply.workable.com" in json.loads(jobs.BANS.read_text())
+    assert jobs.diagnose("workable", "zyte", "").startswith("HTTP 429, бан до")
+
+
+def test_workable_empty_account_no_suffix_probe(monkeypatch):
+    import jobs
+    seen = []
+
+    def fake(url, want_json=True, with_code=False, **k):
+        seen.append(url)
+        return ({"name": "Hospitable", "jobs": []}, 200)
+    monkeypatch.setattr(jobs, "get", fake)
+    assert jobs.workable("hospitable", probe=False) == [] and len(seen) == 1
+    assert jobs.collect("Hospitable", "", {"Hospitable": ("workable", "hospitable")})[3] == []
+    assert len(seen) == 2

@@ -34,6 +34,29 @@ GAP = 0.6
 # подряд его уже злят. Таблица для тех, кому общего зазора мало.
 GAPS = {"apply.workable.com": 3.0}
 _last, _gate = {}, threading.Lock()
+# Хост, приславший 429 с долгим Retry-After, до срока не трогаем. Сборщик —
+# отдельный процесс на каждый обход, поэтому срок лежит в файле, а не в памяти:
+# Workable 2026-11-27 дал бан на 17 часов, и бот стучался в него каждые 4 часа.
+BANS = storage.DATA / "bans.json"
+try:
+    _bans = json.loads(BANS.read_text())
+except (OSError, ValueError):
+    _bans = {}
+
+
+def banned(url):
+    """Срок бана хоста в секундах epoch или None."""
+    until = _bans.get(urllib.parse.urlsplit(url).netloc, 0)
+    return until if until > time.time() else None
+
+
+def ban(url, retry_after):
+    with _gate:
+        _bans[urllib.parse.urlsplit(url).netloc] = time.time() + retry_after
+        try:
+            BANS.write_text(json.dumps(_bans))
+        except OSError:
+            pass               # не записали — значит, постучимся лишний раз
 
 
 def space_out(url):
@@ -55,6 +78,8 @@ def get(url, want_json=True, with_code=False, data=None):
     with_code — вернуть (тело, код). Без кода 404 «такого слага нет» и 429 «нас
     притормозили» неразличимы, и бот после бана дозванивается дальше, углубляя его."""
     raw, code = None, 0
+    if banned(url):
+        return (None, 429) if with_code else None
     for attempt in (0, 1):
         try:
             space_out(url)
@@ -65,6 +90,10 @@ def get(url, want_json=True, with_code=False, data=None):
             break
         except urllib.error.HTTPError as e:
             code = e.code
+            wait = (e.headers.get("Retry-After") or "") if e.headers else ""
+            if e.code == 429 and wait.isdigit() and int(wait) > 60:
+                ban(url, int(wait))      # долгий бан: повтор через 3 с только продлит его
+                break
             if e.code in (429, 500, 502, 503, 504) and attempt == 0:
                 time.sleep(3)
                 continue
@@ -379,12 +408,14 @@ def wk_rows(js):
 _wk_suffix = {}
 
 
-def workable(s):
+def workable(s, probe=True):
     # аккаунты часто заведены с суффиксом: cloudlinux пустой, cloudlinux-1 — 84
-    # вакансии. Найденный запоминаем: три пробы каждый цикл — это и есть тот
-    # всплеск, на котором Cloudflare отвечает 1015 и компания пропадает.
+    # вакансии. Суффиксы перебирает только discover и пишет найденный в реестр.
+    # Обход (probe=False) делает один запрос: иначе пустой Hospitable стоил три
+    # запроса каждые 4 часа. Вакансии переехали под суффикс — это покажет
+    # «доска вернула пустой список» в отчёте.
     empty, throttled = False, False
-    for cand in ([_wk_suffix[s]] if s in _wk_suffix else (s, f"{s}-1", f"{s}-2")):
+    for cand in ([_wk_suffix[s]] if s in _wk_suffix else (s, f"{s}-1", f"{s}-2") if probe else (s,)):
         # details=true отдаёт текст вакансий в том же ответе: отдельный запрос
         # на вакансию здесь стоит дорого — зазор к Workable три секунды.
         d, code = get(f"https://apply.workable.com/api/v1/widget/accounts/{cand}?details=true",
@@ -1412,7 +1443,8 @@ def discover(name, url):
             if demo_board(ats, s):
                 log_skip(name, ats, s, "пробный аккаунт")
                 continue
-            return ats, s
+            # у Workable вакансии бывают под суффиксом: в реестр — найденный аккаунт
+            return ats, _wk_suffix.get(s, s) if ats == "workable" else s
     return None
 
 
@@ -1760,6 +1792,9 @@ def diagnose(ats, slug, url):
              "breezy": f"https://{slug}.breezy.hr/json"}.get(ats, url)
     if not probe:
         return "нет адреса для проверки"
+    until = banned(probe)
+    if until:
+        return "HTTP 429, бан до " + datetime.fromtimestamp(until, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     try:
         urllib.request.urlopen(urllib.request.Request(probe, headers=UA), timeout=TIMEOUT).read()
         return "ответ есть, но разобрать не удалось — возможно, сменился формат"
@@ -1810,6 +1845,8 @@ def collect(name, url, cache, known=(), described=()):
         return name, ats, slug, breezy(slug, described), None
     if ats == "deel":
         return name, ats, slug, deel(slug, described), None
+    if ats == "workable":
+        return name, ats, slug, workable(slug, probe=False), None
     if ats == "revolut":
         return name, ats, slug, revolut(slug, described), None
     if ats:
