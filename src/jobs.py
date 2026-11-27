@@ -134,6 +134,8 @@ ATS_IN_URL = [
     ("comeet", r"((?:www\.)?comeet\.com/jobs/[a-z0-9-]+/[0-9A-Z.]+)"),
     # свой портал micro1: список отдаёт их API, слаг — просто имя
     ("micro1", r"(?:www\.|jobs\.)?(micro1)\.ai(?:/careers|/post/|/?$)"),
+    # свой сайт Deel: список во flight-потоке www.deel.com/careers, слаг — хост
+    ("deel", r"(www\.deel\.com)/careers"),
 ]
 
 
@@ -1064,6 +1066,52 @@ def micro1(s, have_text=()):
     return out or None
 
 
+DEEL_TEXT_MAX = 40   # страниц вакансий за обход: у Deel их 231, текст дочитываем частями
+DEEL_JOB = "https://jobs.deel.com/deel/job-details/{}/overview"
+
+
+def deel(s, have_text=None):
+    """Deel: своя витрина поверх Ashby, публичная доска Ashby у них пустая.
+    Все вакансии лежат во flight-потоке www.deel.com/careers объектами
+    attributes с ashby_id — без текста. Текст — schema.org на странице
+    вакансии jobs.deel.com, только тем, у кого его ещё нет. have_text=None —
+    разведка: страниц не качаем.
+
+    Место работы — all_locations целиком: location_name называет одну страну
+    из пяти, и вакансия «UK, Испания, Португалия» выглядела бы британской."""
+    page = get("https://www.deel.com/careers/", want_json=False)
+    if not isinstance(page, str):
+        return None
+    stream = "".join(
+        chunk for m in re.finditer(r"self\.__next_f\.push\(\[1,(\".*?\")\]\)", page, re.S)
+        for chunk in [json_loads(m.group(1))] if isinstance(chunk, str))
+    dec, seen, out = json.JSONDecoder(), set(), []
+    left = DEEL_TEXT_MAX if have_text is not None else 0
+    for m in re.finditer(r'"attributes":\{', stream):
+        try:
+            j, _ = dec.raw_decode(stream, m.end() - 1)
+        except ValueError:
+            continue
+        jid = j.get("ashby_id")
+        if not jid or not j.get("title") or j.get("is_listed") is False or jid in seen:
+            continue
+        seen.add(jid)
+        url = DEEL_JOB.format(jid)
+        places = j.get("all_locations") or [j.get("location_name") or ""]
+        place = " · ".join(p for p in places[:6] if p)
+        pay = j.get("compensation_tier_summary") \
+            if j.get("should_display_compensation_on_Job_board") else None
+        text = None
+        if left and url not in have_text:
+            rows = jsonld_jobs(get(url, want_json=False) or "")
+            text = rows[0][6] if rows and len(rows[0]) > 6 else None
+            left -= 1
+        out.append((url, j["title"].strip(), place, posted(j.get("ashby_published_date")),
+                    (pay or "").replace("$$", "$") or None, "", text))
+    # пустой поток — сменилась вёрстка, а не закрылись все вакансии разом
+    return out or None
+
+
 COMEET_DATA = re.compile(r'COMPANY_POSITIONS_DATA\s*=\s*(\[.*?\]);\s*\n', re.S)
 
 
@@ -1338,7 +1386,8 @@ ADAPTERS = {"ashby": ashby, "phenom": phenom, "successfactors": successfactors,
             "peopleforce": peopleforce,
             "aviasales": aviasales,
             "micro1": micro1,
-            "breezy": breezy}
+            "breezy": breezy,
+            "deel": deel}
 
 
 def discover(name, url):
@@ -1719,6 +1768,8 @@ def collect(name, url, cache, known=(), described=()):
         return name, ats, slug, micro1(slug, described), None
     if ats == "breezy":
         return name, ats, slug, breezy(slug, described), None
+    if ats == "deel":
+        return name, ats, slug, deel(slug, described), None
     if ats == "revolut":
         return name, ats, slug, revolut(slug, described), None
     if ats:

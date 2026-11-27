@@ -1450,3 +1450,52 @@ def test_breezy_missing_board_and_url(monkeypatch):
     assert jobs.breezy("nobody") is None
     assert jobs.from_url("https://superdispatch.breezy.hr/") == ("breezy", "superdispatch")
     assert jobs.from_url("https://superdispatch.breezy.hr/p/9394767b433e-x") == ("breezy", "superdispatch")
+
+
+def _deel_row(jid, title, places, shown=True, listed=True):
+    import json
+    return json.dumps({"id": 0, "attributes": {
+        "ashby_id": jid, "title": title, "location_name": places[0],
+        "all_locations": places, "is_listed": listed,
+        "ashby_published_date": "2026-11-20T09:45:25.919Z",
+        "compensation_tier_summary": "$$48,000 - $75,000 USD",
+        "should_display_compensation_on_Job_board": shown}}, separators=(",", ":"))
+
+
+def test_deel_reads_careers_flight_and_job_text(monkeypatch):
+    """Deel: список во flight-потоке www.deel.com/careers, текст — schema.org
+    на jobs.deel.com. Все страны, вилка только где её разрешено показывать,
+    скрытые и уже прочитанные вакансии страниц не тянут."""
+    import jobs
+    a, b, c = ("aaaaaaaa-0000-0000-0000-00000000000%d" % i for i in (1, 2, 3))
+    blob = ('{"jobs":[' + ",".join([
+        _deel_row(a, "Applied AI Engineer", ["United Kingdom", "Spain", "Portugal"]),
+        _deel_row(b, "Account Executive", ["Sweden"], shown=False),
+        _deel_row(c, "Hidden", ["Spain"], listed=False),
+        _deel_row(a, "Applied AI Engineer", ["United Kingdom"])]) + ']}')
+    careers = _flight_page([blob[:300], blob[300:]])
+    job = ('<script type="application/ld+json">{"@type": "JobPosting", '
+           '"url": "x", "title": "Applied AI Engineer", '
+           '"description": "<p>LLM systems in Python.</p>"}</script>')
+    gets = []
+
+    def fake_get(url, want_json=True, **k):
+        gets.append(url)
+        return careers if url == "https://www.deel.com/careers/" else job
+
+    monkeypatch.setattr(jobs, "get", fake_get)
+    url_a, url_b = (jobs.DEEL_JOB.format(x) for x in (a, b))
+    got = jobs.deel("www.deel.com", have_text={url_b})
+    assert [g[1] for g in got] == ["Applied AI Engineer", "Account Executive"]
+    first, second = got
+    assert first[:5] == (url_a, "Applied AI Engineer", "United Kingdom · Spain · Portugal",
+                         "2026-11-20", "$48,000 - $75,000 USD")
+    assert "Python" in first[6] and second[4] is None and second[6] is None
+    assert gets == ["https://www.deel.com/careers/", url_a]
+
+    # разведка страниц вакансий не качает, пустая витрина — не «всё закрыто»
+    gets.clear()
+    assert len(jobs.deel("www.deel.com")) == 2 and len(gets) == 1
+    monkeypatch.setattr(jobs, "get", lambda url, want_json=True, **k: "<html></html>")
+    assert jobs.deel("www.deel.com") is None
+    assert jobs.from_url("https://www.deel.com/careers/") == ("deel", "www.deel.com")
