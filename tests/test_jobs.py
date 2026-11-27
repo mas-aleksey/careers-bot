@@ -1499,3 +1499,14 @@ def test_deel_reads_careers_flight_and_job_text(monkeypatch):
     monkeypatch.setattr(jobs, "get", lambda url, want_json=True, **k: "<html></html>")
     assert jobs.deel("www.deel.com") is None
     assert jobs.from_url("https://www.deel.com/careers/") == ("deel", "www.deel.com")
+
+
+def test_embedded_unescapes_href(monkeypatch):
+    """Artezio на hh.ru: в href «&amp;». Модель отвечает адресом с «&», и
+    паспорт с оценкой не находили вакансию — запрос повторялся каждый проход."""
+    import jobs
+    html = ('<a href="https://hh.ru/vacancy/139056402?from=a&amp;hhtmFrom=employer">'
+            '<span>QA-инженер</span><span>Москва</span></a>')
+    monkeypatch.setattr(jobs, "get", lambda url, want_json=True, **k: html)
+    got = jobs.embedded("https://hh.ru/employer/733")
+    assert got and got[0][0] == "https://hh.ru/vacancy/139056402?from=a&hhtmFrom=employer", got

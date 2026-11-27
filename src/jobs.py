@@ -1257,7 +1257,7 @@ def successfactors(s, have_text=()):
                 continue
             place = SF_PLACE.search(row)
             date = SF_DATE.search(re.sub(r"<[^>]+>", " ", row))
-            out.append((urllib.parse.urljoin(f"https://{s}", link.group(1)),
+            out.append((urllib.parse.urljoin(f"https://{s}", html_mod.unescape(link.group(1))),
                         plain_text(link.group(2)) or "",
                         plain_text(place.group(1)) if place else "",
                         sf_date(date.group(1)) if date else None,
@@ -1702,6 +1702,10 @@ def embedded(url, with_text=False):
            for jid, title, place in JOB_IN_PAYLOAD.findall(html)]
     rows = (out or jsonld_jobs(html) or next_data(html) or linked_jobs(html, url)
             or notion_jobs(html) or apply_links(html) or flight_jobs(html, url))
+    # Адрес из href приходит как в HTML: «&amp;» вместо «&». Такая ссылка ведёт
+    # не туда, а модель возвращает её уже раскодированной — паспорт и оценка
+    # не находили свою вакансию и запрашивались заново каждый проход.
+    rows = [(html_mod.unescape(r[0]), *r[1:]) for r in rows or []] or rows
     return page_text(rows, url) if rows and with_text else rows
 
 
