@@ -809,6 +809,10 @@ def test_job_id_like_tells_id_from_section():
     assert not jobs.job_id_like("/jobs/job/apply/r5yeHsqh")       # дубль заявки
     assert not jobs.job_id_like("/career/open-positions/filter")
     assert not jobs.job_id_like("/jobs/web3-developer-2024-guide")
+    # Zoolatech: расширение .html и номер копии вакансии за id
+    assert jobs.job_id_like("/career/vacancies/data-engineer-data-other-central-europe-263814.html")
+    assert jobs.job_id_like("/career/vacancies/ai-engineer-python-other-latam-273434-1.html")
+    assert not jobs.job_id_like("/career/vacancies/index.html")
 
 
 NOTION_HTML = """

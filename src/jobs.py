@@ -1646,11 +1646,13 @@ def job_id_like(href):
     path = href.split("?")[0].split("#")[0].rstrip("/")
     if "/apply/" in path:        # у RED Global та же вакансия ещё и как «Apply now»
         return False
-    seg = path.rsplit("/", 1)[-1]
-    if not re.fullmatch(r"[A-Za-z0-9_-]{4,60}", seg) or not re.search(r"\d", seg):
+    # Zoolatech: /career/vacancies/data-engineer-data-other-central-europe-263814-1.html —
+    # расширение отбрасываем, а за id бывает номер копии той же вакансии в другом регионе.
+    seg = re.sub(r"\.html?$", "", path.rsplit("/", 1)[-1])
+    if not re.fullmatch(r"[A-Za-z0-9_-]{4,120}", seg) or not re.search(r"\d", seg):
         return False
     # Слаг без числового хвоста — это раздел: /jobs/web3-developer-2024-guide.
-    return "-" not in seg or bool(re.search(r"-\d{4,}$", seg))
+    return "-" not in seg or bool(re.search(r"-\d{4,}(?:-\d{1,2})?$", seg))
 
 
 def linked_jobs(html, url, is_job=job_id_like):
@@ -1685,8 +1687,8 @@ def linked_jobs(html, url, is_job=job_id_like):
 # Webflow, /jobs/legal_counsel. Слаг стоит прямо под «карьерным» сегментом,
 # но там же живут и разделы сайта — их отсекает NOT_JOBS.
 SLUG_JOB = re.compile(r"/(?:careers?|jobs?|vacanc\w*|positions?)/[A-Za-z0-9_-]{2,80}/?$")
-NOT_JOBS = {"about", "all", "apply", "benefits", "culture", "faq", "how-we-work",
-            "internship", "internships", "join-us", "life", "open-positions",
+NOT_JOBS = {"about", "about-us", "all", "apply", "benefits", "culture", "faq", "how-we-work",
+            "internship", "internships", "join-our-team", "join-us", "life", "open-positions",
             "privacy-notice", "search", "students", "talent-development", "team",
             "vacancies", "values"}
 CTA = {"apply", "apply now", "show more", "read more", "learn more", "details",
