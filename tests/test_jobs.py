@@ -1529,6 +1529,10 @@ def test_slug_jobs_last_resort(monkeypatch):
     one = '<a href="/vacancy/qa-lead">QA Lead</a><a href="/careers/join-us">Join us</a>'
     monkeypatch.setattr(jobs, "get", lambda url, want_json=True, **k: one)
     assert not jobs.embedded("https://x.huntflow.io/")
+    # Известная компания (обход читает с текстом): одной ссылки достаточно.
+    monkeypatch.setattr(jobs, "page_text", lambda rows, listing: rows)
+    got = jobs.embedded("https://x.huntflow.io/", with_text=True)
+    assert [r[0] for r in got] == ["https://x.huntflow.io/vacancy/qa-lead"], got
 
 
 def test_long_retry_after_bans_host(monkeypatch):

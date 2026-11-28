@@ -1699,16 +1699,17 @@ def slug_job(href):
             and path.rstrip("/").rsplit("/", 1)[-1].lower() not in NOT_JOBS)
 
 
-def slug_jobs(html, url):
+def slug_jobs(html, url, least=2):
     """Последняя ступень разбора: слаги берутся, только если ничто другое на
     странице вакансий не нашло. Иначе у Kake, которую читает flight_jobs,
     сменились бы адреса всех 63 вакансий.
 
-    ponytail: одиночная ссылка-слаг чаще пункт меню, чем вакансия, поэтому
-    нужно хотя бы две. Компанию с единственной вакансией так не видно — её
-    ловит слежение за страницей."""
+    ponytail: при разведке одиночная ссылка-слаг чаще пункт меню, чем
+    вакансия, поэтому нужно хотя бы две. У компании, уже заведённой как
+    embedded, страница проверена — там хватает одной: у A-Players из двух
+    вакансий осталась одна, и доска стала «пустой», а закрытая висела открытой."""
     rows = linked_jobs(html, url, slug_job)
-    return rows if len(rows) >= 2 else []
+    return rows if len(rows) >= least else []
 
 
 # Dover отдаёт пустую оболочку SPA, а карточку — своим API, без ключа.
@@ -1769,7 +1770,7 @@ def embedded(url, with_text=False):
            for jid, title, place in JOB_IN_PAYLOAD.findall(html)]
     rows = (out or jsonld_jobs(html) or next_data(html) or linked_jobs(html, url)
             or notion_jobs(html) or apply_links(html) or flight_jobs(html, url)
-            or slug_jobs(html, url))
+            or slug_jobs(html, url, 1 if with_text else 2))
     # Адрес из href приходит как в HTML: «&amp;» вместо «&». Такая ссылка ведёт
     # не туда, а модель возвращает её уже раскодированной — паспорт и оценка
     # не находили свою вакансию и запрашивались заново каждый проход.
